@@ -1,0 +1,11 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+
+# Platform folders can be regenerated with:
+# flutter create . --platforms=windows,linux,macos
+windows/flutter/ephemeral/
+linux/flutter/ephemeral/
+macos/Flutter/ephemeral/

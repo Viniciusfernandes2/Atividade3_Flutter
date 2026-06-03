@@ -1,0 +1,2032 @@
+﻿diff --git a/app/android/app/src/main/AndroidManifest.xml b/app/android/app/src/main/AndroidManifest.xml
+index 2a22424..2404cfe 100644
+--- a/app/android/app/src/main/AndroidManifest.xml
++++ b/app/android/app/src/main/AndroidManifest.xml
+@@ -3,6 +3,8 @@
+     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+     <uses-permission android:minSdkVersion="29" android:name="android.permission.ACCESS_FINE_LOCATION" />
+     <uses-permission android:name="android.permission.CAMERA" />
++    <uses-permission android:name="android.permission.INTERNET" />
++    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+     <uses-permission android:name="android.permission.BLUETOOTH" />
+diff --git a/app/android/app/src/main/kotlin/com/example/exemplo_quatro/MainActivity.kt b/app/android/app/src/main/kotlin/com/example/exemplo_quatro/MainActivity.kt
+index ee11e2f..1ccfa9c 100644
+--- a/app/android/app/src/main/kotlin/com/example/exemplo_quatro/MainActivity.kt
++++ b/app/android/app/src/main/kotlin/com/example/exemplo_quatro/MainActivity.kt
+@@ -7,12 +7,14 @@ import io.flutter.embedding.engine.FlutterEngine
+ import io.flutter.plugin.common.MethodChannel
+ 
+ class MainActivity : FlutterActivity() {
+-    private val channelName = "br.sp.gov.cps.dsm.chat/connection_foreground_service"
++    private val foregroundChannelName = "br.sp.gov.cps.dsm.chat/connection_foreground_service"
++    private val wifiDirectChannelName = "br.sp.gov.cps.dsm.chat/wifi_direct"
++    private var wifiDirectTransport: WifiDirectTransport? = null
+ 
+     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+         super.configureFlutterEngine(flutterEngine)
+ 
+-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
++        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, foregroundChannelName)
+             .setMethodCallHandler { call, result ->
+                 when (call.method) {
+                     "start" -> {
+@@ -26,6 +28,19 @@ class MainActivity : FlutterActivity() {
+                     else -> result.notImplemented()
+                 }
+             }
++
++        val wifiDirectChannel = MethodChannel(
++            flutterEngine.dartExecutor.binaryMessenger,
++            wifiDirectChannelName,
++        )
++        wifiDirectTransport = WifiDirectTransport(this, wifiDirectChannel)
++        wifiDirectChannel.setMethodCallHandler(wifiDirectTransport)
++    }
++
++    override fun onDestroy() {
++        wifiDirectTransport?.dispose()
++        wifiDirectTransport = null
++        super.onDestroy()
+     }
+ 
+     private fun startConnectionService() {
+diff --git a/app/lib/features/connection/connection_screen.dart b/app/lib/features/connection/connection_screen.dart
+index 27804aa..c812e99 100644
+--- a/app/lib/features/connection/connection_screen.dart
++++ b/app/lib/features/connection/connection_screen.dart
+@@ -8,9 +8,9 @@ import 'package:flutter/material.dart';
+ import 'package:nearby_connections/nearby_connections.dart';
+ import 'package:permission_handler/permission_handler.dart';
+ import 'package:shared_preferences/shared_preferences.dart';
+-import 'package:universal_ble/universal_ble.dart';
+ 
+ import '../../core/platform/connection_foreground_service.dart';
++import '../../core/platform/wifi_direct_service.dart';
+ 
+ part 'models/connection_models.dart';
+ part 'data/message_protocol.dart';
+@@ -23,18 +23,13 @@ class ConnectionScreen extends StatefulWidget {
+   State<ConnectionScreen> createState() => _ConnectionScreenState();
+ }
+ 
+-enum _AcaoMenu { editarNome, buscarCelulares, buscarNotebooks }
++enum _AcaoMenu { editarNome, buscarCelulares, buscarWifiDirect }
+ 
+-enum _TipoConversa { celular, notebookCentral, notebookPeripheral }
++enum _TipoConversa { celular, wifiDirect }
+ 
+ class _ConnectionScreenState extends State<ConnectionScreen>
+     with WidgetsBindingObserver {
+   static const String _serviceId = 'br.sp.gov.cps.dsm.chat';
+-  static const String _serviceUuid = '07eab2e6-fc51-5e32-a09b-788f502b8ed7';
+-  static const String _messageCharacteristicUuid =
+-      '6dff0753-7a8e-57d7-9858-f4f4c781cb81';
+-  static const String _notifyCharacteristicUuid =
+-      '8bc8e5cf-54eb-59ff-a05d-f94177f07f8d';
+   static const String _nomeUsuarioPrefsKey = 'connection_user_name';
+   static const String _mensagensPrefsKey = 'connection_messages';
+   static const Strategy _strategy = Strategy.P2P_CLUSTER;
+@@ -42,9 +37,8 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   final TextEditingController _mensagemController = TextEditingController();
+   final List<_AparelhoEncontrado> _aparelhosEncontrados = [];
+   final Map<String, ConnectionInfo> _aparelhosConectados = {};
+-  final Map<String, BleDevice> _notebooksEncontrados = {};
+-  final Map<String, BleDevice> _notebooksConectados = {};
+-  final Map<String, String> _clientesBlePeripheral = {};
++  final List<_AparelhoEncontrado> _wifiDirectEncontrados = [];
++  final Map<String, String> _wifiDirectConectados = {};
+   final List<_MensagemChat> _mensagens = [];
+   final List<StreamSubscription<dynamic>> _subscriptions = [];
+ 
+@@ -52,12 +46,12 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   VoidCallback? _atualizarModalBusca;
+ 
+   bool _anunciando = false;
+-  bool _anunciandoBle = false;
+   bool _alternandoDisponibilidade = false;
+   bool _procurando = false;
+-  bool _procurandoBle = false;
++  bool _procurandoWifiDirect = false;
+   bool _conectando = false;
+-  bool _conectandoBle = false;
++  bool _conectandoWifiDirect = false;
++  bool _wifiDirectAtivo = false;
+   bool _appEmPrimeiroPlano = true;
+   String? _mensagemErro;
+   late String _nomeUsuario;
+@@ -67,7 +61,8 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     super.initState();
+     WidgetsBinding.instance.addObserver(this);
+     _nomeUsuario = 'Aparelho ${Random().nextInt(9000) + 1000}';
+-    _configurarBle();
++    WifiDirectService.initialize();
++    _subscriptions.add(WifiDirectService.events.listen(_aoEventoWifiDirect));
+     unawaited(_inicializarDisponibilidade());
+   }
+ 
+@@ -133,7 +128,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     final nomeNormalizado = nome?.trim();
+     if (nomeNormalizado == null || nomeNormalizado.isEmpty || !mounted) return;
+ 
+-    final estavaDisponivel = _anunciando || _anunciandoBle;
++    final estavaDisponivel = _anunciando;
+     if (estavaDisponivel) {
+       await _pararAnuncio();
+     }
+@@ -150,7 +145,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   }
+ 
+   Future<void> _garantirDisponibilidade() async {
+-    if (_anunciando || _anunciandoBle || _alternandoDisponibilidade) return;
++    if (_anunciando || _alternandoDisponibilidade) return;
+     setState(() {
+       _mensagemErro = null;
+       _alternandoDisponibilidade = true;
+@@ -173,95 +168,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     }
+   }
+ 
+-  void _configurarBle() {
+-    UniversalBle.timeout = const Duration(seconds: 12);
+-
+-    _subscriptions.add(
+-      UniversalBle.scanStream.listen((device) {
+-        if (!mounted || _notebooksConectados.containsKey(device.deviceId)) {
+-          return;
+-        }
+-
+-        setState(() {
+-          _notebooksEncontrados[device.deviceId] = device;
+-        });
+-        _atualizarModalBusca?.call();
+-      }),
+-    );
+-
+-    UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
+-      if (!mounted) return;
+-
+-      setState(() {
+-        if (!isConnected) {
+-          final chave = _chaveNotebookCentral(deviceId);
+-          final nome =
+-              _notebooksConectados.remove(deviceId)?.name ?? 'Notebook';
+-          if (_conversaSelecionadaId == chave) {
+-            _conversaSelecionadaId = null;
+-          }
+-          _mostrarMensagem('$nome desconectou.');
+-        }
+-        if (error != null && error.isNotEmpty) {
+-          _mensagemErro = error;
+-        }
+-      });
+-    };
+-
+-    UniversalBle.onValueChange = (deviceId, characteristicId, value, _) {
+-      if (characteristicId.toLowerCase() != _notifyCharacteristicUuid) return;
+-      _adicionarMensagemBle(deviceId, value);
+-    };
+-
+-    UniversalBlePeripheral.setWriteRequestHandlers((
+-      deviceId,
+-      characteristicId,
+-      offset,
+-      value,
+-    ) {
+-      if (characteristicId.toLowerCase() == _messageCharacteristicUuid &&
+-          value != null) {
+-        _adicionarMensagemBle(deviceId, value);
+-      }
+-      return PeripheralWriteRequestResult();
+-    });
+-
+-    UniversalBlePeripheral.setReadRequestHandlers(
+-      (_, _, _, value) =>
+-          PeripheralReadRequestResult(value: value ?? Uint8List(0)),
+-    );
+-
+-    _subscriptions.add(
+-      UniversalBlePeripheral.connectionStateStream.listen((event) {
+-        if (!mounted) return;
+-        setState(() {
+-          if (event.connected) {
+-            _clientesBlePeripheral[event.deviceId] = event.deviceId;
+-          } else {
+-            final chave = _chaveNotebookPeripheral(event.deviceId);
+-            final nome =
+-                _clientesBlePeripheral.remove(event.deviceId) ?? 'Notebook';
+-            if (_conversaSelecionadaId == chave) {
+-              _conversaSelecionadaId = null;
+-            }
+-            _mostrarMensagem('$nome desconectou.');
+-          }
+-        });
+-      }),
+-    );
+-
+-    _subscriptions.add(
+-      UniversalBlePeripheral.advertisingStateStream.listen((event) {
+-        if (!mounted) return;
+-        setState(() {
+-          _anunciandoBle =
+-              event.state == PeripheralAdvertisingState.advertising;
+-          _mensagemErro = event.error;
+-        });
+-      }),
+-    );
+-  }
+-
+   @override
+   void dispose() {
+     WidgetsBinding.instance.removeObserver(this);
+@@ -272,12 +178,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     Nearby().stopAdvertising();
+     Nearby().stopDiscovery();
+     Nearby().stopAllEndpoints();
+-    UniversalBle.stopScan();
+-    UniversalBlePeripheral.stopAdvertising();
+-    UniversalBlePeripheral.clearServices();
+-    for (final deviceId in _notebooksConectados.keys.toList()) {
+-      unawaited(UniversalBle.disconnect(deviceId));
+-    }
++    unawaited(WifiDirectService.stop().catchError((_) {}));
+     super.dispose();
+   }
+ 
+@@ -310,12 +211,9 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+ 
+   Future<void> _pararAnuncio() async {
+     await Nearby().stopAdvertising();
+-    await UniversalBlePeripheral.stopAdvertising();
+-    await UniversalBlePeripheral.clearServices();
+     if (!mounted) return;
+     setState(() {
+       _anunciando = false;
+-      _anunciandoBle = false;
+     });
+   }
+ 
+@@ -324,8 +222,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+ 
+     await ConnectionForegroundService.start();
+ 
+-    final iniciadoBle = await _iniciarAnuncioBle();
+-
+     var iniciado = false;
+     try {
+       iniciado = await Nearby().startAdvertising(
+@@ -344,67 +240,9 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     if (!mounted) return;
+     setState(() {
+       _anunciando = iniciado;
+-      _anunciandoBle = iniciadoBle;
+     });
+   }
+ 
+-  Future<bool> _iniciarAnuncioBle() async {
+-    try {
+-      final caps = await UniversalBlePeripheral.getCapabilities();
+-      if (!caps.supportsPeripheralMode) {
+-        _definirErro('Este celular não suporta modo periférico BLE.');
+-        return false;
+-      }
+-
+-      final readiness = await UniversalBlePeripheral.getAvailabilityState();
+-      if (readiness != PeripheralReadinessState.ready) {
+-        _definirErro('Bluetooth indisponível para BLE: ${readiness.name}.');
+-        return false;
+-      }
+-
+-      await UniversalBlePeripheral.clearServices();
+-      await UniversalBlePeripheral.addService(
+-        BlePeripheralService(
+-          uuid: _serviceUuid,
+-          primary: true,
+-          characteristics: [
+-            BlePeripheralCharacteristic(
+-              uuid: _messageCharacteristicUuid,
+-              properties: [
+-                CharacteristicProperty.write,
+-                CharacteristicProperty.writeWithoutResponse,
+-              ],
+-              permissions: [PeripheralAttributePermission.writeable],
+-            ),
+-            BlePeripheralCharacteristic(
+-              uuid: _notifyCharacteristicUuid,
+-              properties: [
+-                CharacteristicProperty.read,
+-                CharacteristicProperty.notify,
+-              ],
+-              permissions: [
+-                PeripheralAttributePermission.readable,
+-                PeripheralAttributePermission.writeable,
+-              ],
+-            ),
+-          ],
+-        ),
+-      );
+-
+-      await UniversalBlePeripheral.startAdvertising(
+-        services: await UniversalBlePeripheral.getServices(),
+-        localName: null,
+-      );
+-      return true;
+-    } catch (erro) {
+-      if (_erroJaEstaAnunciando(erro)) {
+-        return true;
+-      }
+-      _definirErro('Não foi possível anunciar por BLE: $erro');
+-      return false;
+-    }
+-  }
+-
+   bool _erroJaEstaAnunciando(Object erro) {
+     final texto = erro.toString();
+     return texto.contains('STATUS_ALREADY_ADVERTISING') ||
+@@ -463,88 +301,126 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     }
+   }
+ 
+-  Future<void> _alternarBuscaBle() async {
++  Future<void> _iniciarWifiDirect() async {
++    if (_wifiDirectAtivo) return;
++    if (!await _pedirPermissoes()) return;
++
++    try {
++      await WifiDirectService.start(deviceName: _nomeUsuario);
++      if (!mounted) return;
++      setState(() => _wifiDirectAtivo = true);
++    } catch (erro) {
++      _definirErro('Nao foi possivel iniciar Wi-Fi Direct: $erro');
++    }
++  }
++
++  Future<void> _alternarBuscaWifiDirect() async {
+     setState(() {
+       _mensagemErro = null;
+     });
+ 
+-    if (_procurandoBle) {
+-      await UniversalBle.stopScan();
++    await _iniciarWifiDirect();
++    if (!_wifiDirectAtivo) return;
++
++    if (_procurandoWifiDirect) {
++      await WifiDirectService.stopDiscovery();
+       if (!mounted) return;
+-      setState(() {
+-        _procurandoBle = false;
+-      });
++      setState(() => _procurandoWifiDirect = false);
+       return;
+     }
+ 
+-    if (!await _pedirPermissoes()) return;
+-
+     try {
+-      await UniversalBle.requestPermissions();
+-      if (!mounted) return;
+-
+       setState(() {
+-        _notebooksEncontrados.clear();
+-        _procurandoBle = true;
++        _wifiDirectEncontrados.clear();
++        _procurandoWifiDirect = true;
+       });
+-
+-      await UniversalBle.startScan(
+-        scanFilter: ScanFilter(withServices: [_serviceUuid]),
+-      );
++      await WifiDirectService.discover();
+     } catch (erro) {
+       if (mounted) {
+-        setState(() {
+-          _procurandoBle = false;
+-        });
++        setState(() => _procurandoWifiDirect = false);
+       }
+-      _definirErro('Não foi possível procurar notebooks BLE: $erro');
++      _definirErro('Nao foi possivel buscar por Wi-Fi Direct: $erro');
+     }
+   }
+ 
+-  Future<void> _conectarBle(BleDevice notebook) async {
+-    if (_conectandoBle) return;
++  Future<void> _conectarWifiDirect(_AparelhoEncontrado aparelho) async {
++    if (_conectandoWifiDirect) return;
+ 
+     try {
+       setState(() {
+-        _conectandoBle = true;
++        _conectandoWifiDirect = true;
+         _mensagemErro = null;
+       });
+ 
+-      if (_procurandoBle) {
+-        await UniversalBle.stopScan();
++      await _iniciarWifiDirect();
++      await WifiDirectService.connect(aparelho.id);
++    } catch (erro) {
++      _definirErro('Falha ao conectar por Wi-Fi Direct: $erro');
++      if (mounted) {
++        setState(() => _conectandoWifiDirect = false);
+       }
++    }
++  }
+ 
+-      await UniversalBle.connect(notebook.deviceId);
+-      await UniversalBle.discoverServices(
+-        notebook.deviceId,
+-        withDescriptors: true,
+-      );
+-      await UniversalBle.subscribeNotifications(
+-        notebook.deviceId,
+-        _serviceUuid,
+-        _notifyCharacteristicUuid,
+-      );
++  void _aoEventoWifiDirect(WifiDirectEvent event) {
++    if (!mounted) return;
+ 
+-      if (!mounted) return;
+-      setState(() {
+-        _procurandoBle = false;
+-        _notebooksEncontrados.remove(notebook.deviceId);
+-        _notebooksConectados[notebook.deviceId] = notebook;
+-        _conversaSelecionadaId = _chaveNotebookCentral(notebook.deviceId);
+-      });
+-      unawaited(
+-        _reenviarMensagensPendentes(_chaveNotebookCentral(notebook.deviceId)),
+-      );
+-      _atualizarModalBusca?.call();
+-      _mostrarMensagem('Notebook conectado.');
+-    } catch (erro) {
+-      _definirErro('Falha ao conectar no notebook. Busque novamente. $erro');
+-    } finally {
+-      if (mounted) {
++    switch (event) {
++      case WifiDirectPeersChanged(:final devices):
+         setState(() {
+-          _conectandoBle = false;
++          _wifiDirectEncontrados
++            ..clear()
++            ..addAll(
++              devices
++                  .where(
++                    (device) => !_wifiDirectConectados.containsKey(device.id),
++                  )
++                  .map(
++                    (device) =>
++                        _AparelhoEncontrado(id: device.id, nome: device.name),
++                  ),
++            );
+         });
+-      }
++        _atualizarModalBusca?.call();
++      case WifiDirectDiscoveryChanged(:final discovering):
++        setState(() => _procurandoWifiDirect = discovering);
++        _atualizarModalBusca?.call();
++      case WifiDirectConnected(:final id, :final name):
++        setState(() {
++          _wifiDirectAtivo = true;
++          _conectandoWifiDirect = false;
++          _procurandoWifiDirect = false;
++          _wifiDirectEncontrados.removeWhere((item) => item.id == id);
++          _wifiDirectConectados[id] = name;
++          _conversaSelecionadaId = _chaveWifiDirect(id);
++        });
++        _atualizarModalBusca?.call();
++        _marcarConversaComoAberta(_chaveWifiDirect(id));
++        unawaited(_reenviarMensagensPendentes(_chaveWifiDirect(id)));
++        _mostrarMensagem('Conectado por Wi-Fi Direct.');
++      case WifiDirectDisconnected(:final id):
++        final nome = _wifiDirectConectados[id] ?? 'Wi-Fi Direct';
++        setState(() {
++          _wifiDirectConectados.remove(id);
++          if (_conversaSelecionadaId == _chaveWifiDirect(id)) {
++            _conversaSelecionadaId = null;
++          }
++        });
++        _mostrarMensagem('$nome desconectou.');
++      case WifiDirectMessageReceived(:final id, :final name, :final data):
++        if (!_wifiDirectConectados.containsKey(id)) {
++          setState(() => _wifiDirectConectados[id] = name);
++        }
++        final texto = utf8.decode(data, allowMalformed: true).trim();
++        if (texto.isEmpty) return;
++        _processarPacotesRecebidos(texto, _chaveWifiDirect(id), name);
++      case WifiDirectError(:final message):
++        setState(() {
++          _conectandoWifiDirect = false;
++          _procurandoWifiDirect = false;
++        });
++        _definirErro(message);
++        _atualizarModalBusca?.call();
+     }
+   }
+ 
+@@ -695,6 +571,15 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     _mostrarMensagem('$nome desconectou.');
+   }
+ 
++  Future<void> _enviarBytes(_Conversa conversa, Uint8List bytes) async {
++    switch (conversa.tipo) {
++      case _TipoConversa.celular:
++        await Nearby().sendBytesPayload(conversa.deviceId, bytes);
++      case _TipoConversa.wifiDirect:
++        await WifiDirectService.sendBytes(conversa.deviceId, bytes);
++    }
++  }
++
+   Future<void> _enviarMensagem() async {
+     final texto = _mensagemController.text.trim();
+     final conversa = _conversaSelecionada;
+@@ -719,22 +604,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     final bytes = _codificarMensagem(mensagemId, texto);
+ 
+     try {
+-      switch (conversa.tipo) {
+-        case _TipoConversa.celular:
+-          await Nearby().sendBytesPayload(conversa.deviceId, bytes);
+-        case _TipoConversa.notebookCentral:
+-          await UniversalBle.write(
+-            conversa.deviceId,
+-            _serviceUuid,
+-            _messageCharacteristicUuid,
+-            bytes,
+-          );
+-        case _TipoConversa.notebookPeripheral:
+-          await UniversalBlePeripheral.updateCharacteristicValue(
+-            characteristicId: _notifyCharacteristicUuid,
+-            value: bytes,
+-          );
+-      }
++      await _enviarBytes(conversa, bytes);
+       _atualizarStatusMensagem(mensagemId, MessageStatus.recebida);
+     } catch (erro) {
+       _definirErro('Não foi possível enviar a mensagem: $erro');
+@@ -761,20 +631,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     unawaited(_persistirMensagens());
+   }
+ 
+-  void _adicionarMensagemBle(String deviceId, Uint8List value) {
+-    final texto = utf8.decode(value, allowMalformed: true).trim();
+-    if (texto.isEmpty || !mounted) return;
+-
+-    final nome =
+-        _notebooksConectados[deviceId]?.name ??
+-        _clientesBlePeripheral[deviceId] ??
+-        'Notebook';
+-    final conversaId = _notebooksConectados.containsKey(deviceId)
+-        ? _chaveNotebookCentral(deviceId)
+-        : _chaveNotebookPeripheral(deviceId);
+-    _processarPacotesRecebidos(texto, conversaId, nome);
+-  }
+-
+   void _marcarConversaComoAberta(String conversaId) {
+     if (!mounted || !_conversaEstaAberta(conversaId)) return;
+     var alterou = false;
+@@ -808,22 +664,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     if (conversa == null) return;
+ 
+     final bytes = _codificarConfirmacaoAbertura(mensagemId);
+-    switch (conversa.tipo) {
+-      case _TipoConversa.celular:
+-        await Nearby().sendBytesPayload(conversa.deviceId, bytes);
+-      case _TipoConversa.notebookCentral:
+-        await UniversalBle.write(
+-          conversa.deviceId,
+-          _serviceUuid,
+-          _messageCharacteristicUuid,
+-          bytes,
+-        );
+-      case _TipoConversa.notebookPeripheral:
+-        await UniversalBlePeripheral.updateCharacteristicValue(
+-          characteristicId: _notifyCharacteristicUuid,
+-          value: bytes,
+-        );
+-    }
++    await _enviarBytes(conversa, bytes);
+   }
+ 
+   Future<void> _reenviarMensagensPendentes(String conversaId) async {
+@@ -841,22 +682,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     if (pendentes.isEmpty) return;
+ 
+     final bytes = _codificarLoteMensagens(pendentes);
+-    switch (conversa.tipo) {
+-      case _TipoConversa.celular:
+-        await Nearby().sendBytesPayload(conversa.deviceId, bytes);
+-      case _TipoConversa.notebookCentral:
+-        await UniversalBle.write(
+-          conversa.deviceId,
+-          _serviceUuid,
+-          _messageCharacteristicUuid,
+-          bytes,
+-        );
+-      case _TipoConversa.notebookPeripheral:
+-        await UniversalBlePeripheral.updateCharacteristicValue(
+-          characteristicId: _notifyCharacteristicUuid,
+-          value: bytes,
+-        );
+-    }
++    await _enviarBytes(conversa, bytes);
+ 
+     for (final mensagem in pendentes) {
+       _atualizarStatusMensagem(mensagem.id, MessageStatus.recebida);
+@@ -864,8 +690,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   }
+ 
+   String _chaveCelular(String id) => 'celular:$id';
+-  String _chaveNotebookCentral(String id) => 'notebook-central:$id';
+-  String _chaveNotebookPeripheral(String id) => 'notebook-peripheral:$id';
++  String _chaveWifiDirect(String id) => 'wifi-direct:$id';
+ 
+   List<_Conversa> get _conversas {
+     return [
+@@ -878,25 +703,14 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+           tipo: _TipoConversa.celular,
+           icone: Icons.smartphone,
+         ),
+-      for (final entry in _notebooksConectados.entries)
+-        _Conversa(
+-          id: _chaveNotebookCentral(entry.key),
+-          deviceId: entry.key,
+-          nome: entry.value.name?.isNotEmpty == true
+-              ? entry.value.name!
+-              : 'Notebook BLE',
+-          subtitulo: 'Notebook',
+-          tipo: _TipoConversa.notebookCentral,
+-          icone: Icons.computer,
+-        ),
+-      for (final entry in _clientesBlePeripheral.entries)
++      for (final entry in _wifiDirectConectados.entries)
+         _Conversa(
+-          id: _chaveNotebookPeripheral(entry.key),
++          id: _chaveWifiDirect(entry.key),
+           deviceId: entry.key,
+-          nome: 'Notebook BLE',
+-          subtitulo: 'Notebook',
+-          tipo: _TipoConversa.notebookPeripheral,
+-          icone: Icons.computer,
++          nome: entry.value,
++          subtitulo: 'Wi-Fi Direct',
++          tipo: _TipoConversa.wifiDirect,
++          icone: Icons.wifi,
+         ),
+     ];
+   }
+@@ -960,9 +774,9 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     }
+   }
+ 
+-  Future<void> _abrirBuscaNotebooks() async {
+-    if (!_procurandoBle) {
+-      await _alternarBuscaBle();
++  Future<void> _abrirBuscaWifiDirect() async {
++    if (!_procurandoWifiDirect) {
++      await _alternarBuscaWifiDirect();
+     }
+     if (!mounted) return;
+ 
+@@ -973,11 +787,11 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+         return StatefulBuilder(
+           builder: (context, setModalState) {
+             _atualizarModalBusca = () => setModalState(() {});
+-            return _ModalBuscaNotebooks(
+-              notebooks: _notebooksEncontrados.values.toList(),
+-              conectando: _conectandoBle,
+-              onConectar: (notebook) async {
+-                await _conectarBle(notebook);
++            return _ModalBuscaWifiDirect(
++              aparelhos: _wifiDirectEncontrados,
++              conectando: _conectandoWifiDirect,
++              onConectar: (aparelho) async {
++                await _conectarWifiDirect(aparelho);
+                 if (context.mounted && Navigator.of(context).canPop()) {
+                   Navigator.of(context).pop();
+                 }
+@@ -989,15 +803,12 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     );
+ 
+     _atualizarModalBusca = null;
+-    if (_procurandoBle) {
+-      await UniversalBle.stopScan();
++    if (_procurandoWifiDirect) {
++      await WifiDirectService.stopDiscovery();
+       if (mounted) {
+-        setState(() => _procurandoBle = false);
++        setState(() => _procurandoWifiDirect = false);
+       }
+     }
+-    if (mounted) {
+-      await _garantirDisponibilidade();
+-    }
+   }
+ 
+   void _definirErro(String mensagem) {
+@@ -1027,7 +838,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+                 onPressed: () => setState(() => _conversaSelecionadaId = null),
+                 icon: const Icon(Icons.arrow_back),
+               ),
+-        title: Text(conversa?.nome ?? 'Conexão Bluetooth'),
++        title: Text(conversa?.nome ?? 'Chat local'),
+         actions: [
+           PopupMenuButton<_AcaoMenu>(
+             onSelected: (acao) {
+@@ -1036,8 +847,8 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+                   _abrirEdicaoNome();
+                 case _AcaoMenu.buscarCelulares:
+                   _abrirBuscaCelulares();
+-                case _AcaoMenu.buscarNotebooks:
+-                  _abrirBuscaNotebooks();
++                case _AcaoMenu.buscarWifiDirect:
++                  _abrirBuscaWifiDirect();
+               }
+             },
+             itemBuilder: (context) => [
+@@ -1058,10 +869,10 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+                 ),
+               ),
+               const PopupMenuItem(
+-                value: _AcaoMenu.buscarNotebooks,
++                value: _AcaoMenu.buscarWifiDirect,
+                 child: ListTile(
+-                  leading: Icon(Icons.computer),
+-                  title: Text('Buscar notebooks'),
++                  leading: Icon(Icons.wifi),
++                  title: Text('Buscar Wi-Fi Direct'),
+                   contentPadding: EdgeInsets.zero,
+                 ),
+               ),
+@@ -1086,9 +897,8 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+                       conversas: _conversas,
+                       mensagens: _mensagens,
+                       nomeUsuario: _nomeUsuario,
+-                      disponivel: _anunciando || _anunciandoBle,
+-                      nearbyDisponivel: _anunciando,
+-                      bleDisponivel: _anunciandoBle,
++                      disponivel: _anunciando,
++                      wifiDirectAtivo: _wifiDirectAtivo,
+                       onSelecionar: (conversa) {
+                         setState(() => _conversaSelecionadaId = conversa.id);
+                         _marcarConversaComoAberta(conversa.id);
+diff --git a/app/lib/features/connection/widgets/connection_widgets.dart b/app/lib/features/connection/widgets/connection_widgets.dart
+index 83c9dbe..fc2ac20 100644
+--- a/app/lib/features/connection/widgets/connection_widgets.dart
++++ b/app/lib/features/connection/widgets/connection_widgets.dart
+@@ -60,8 +60,7 @@ class _ListaConversas extends StatelessWidget {
+     required this.mensagens,
+     required this.nomeUsuario,
+     required this.disponivel,
+-    required this.nearbyDisponivel,
+-    required this.bleDisponivel,
++    required this.wifiDirectAtivo,
+     required this.onSelecionar,
+   });
+ 
+@@ -69,8 +68,7 @@ class _ListaConversas extends StatelessWidget {
+   final List<_MensagemChat> mensagens;
+   final String nomeUsuario;
+   final bool disponivel;
+-  final bool nearbyDisponivel;
+-  final bool bleDisponivel;
++  final bool wifiDirectAtivo;
+   final ValueChanged<_Conversa> onSelecionar;
+ 
+   @override
+@@ -92,8 +90,8 @@ class _ListaConversas extends StatelessWidget {
+               const SizedBox(height: 8),
+               Text(
+                 disponivel
+-                    ? 'Celulares: ${nearbyDisponivel ? 'disponível' : 'indisponível'} | Notebooks: ${bleDisponivel ? 'disponível' : 'indisponível'}'
+-                    : 'Use o menu para ficar disponível ou buscar dispositivos.',
++                    ? 'Nearby: disponivel | Wi-Fi Direct: ${wifiDirectAtivo ? 'ativo' : 'inativo'}'
++                    : 'Use o menu para ficar disponivel ou buscar dispositivos.',
+                 textAlign: TextAlign.center,
+               ),
+             ],
+@@ -180,16 +178,16 @@ class _ModalBuscaCelulares extends StatelessWidget {
+   }
+ }
+ 
+-class _ModalBuscaNotebooks extends StatelessWidget {
+-  const _ModalBuscaNotebooks({
+-    required this.notebooks,
++class _ModalBuscaWifiDirect extends StatelessWidget {
++  const _ModalBuscaWifiDirect({
++    required this.aparelhos,
+     required this.conectando,
+     required this.onConectar,
+   });
+ 
+-  final List<BleDevice> notebooks;
++  final List<_AparelhoEncontrado> aparelhos;
+   final bool conectando;
+-  final ValueChanged<BleDevice> onConectar;
++  final ValueChanged<_AparelhoEncontrado> onConectar;
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -202,7 +200,7 @@ class _ModalBuscaNotebooks extends StatelessWidget {
+             child: Row(
+               children: [
+                 Text(
+-                  'Buscar notebooks',
++                  'Buscar Wi-Fi Direct',
+                   style: Theme.of(context).textTheme.titleLarge,
+                 ),
+                 const Spacer(),
+@@ -214,8 +212,8 @@ class _ModalBuscaNotebooks extends StatelessWidget {
+             ),
+           ),
+           Expanded(
+-            child: _ListaNotebooks(
+-              notebooks: notebooks,
++            child: _ListaAparelhos(
++              aparelhos: aparelhos,
+               conectando: conectando,
+               onConectar: onConectar,
+             ),
+@@ -273,56 +271,6 @@ class _ListaAparelhos extends StatelessWidget {
+   }
+ }
+ 
+-class _ListaNotebooks extends StatelessWidget {
+-  const _ListaNotebooks({
+-    required this.notebooks,
+-    required this.conectando,
+-    required this.onConectar,
+-  });
+-
+-  final List<BleDevice> notebooks;
+-  final bool conectando;
+-  final ValueChanged<BleDevice> onConectar;
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    if (notebooks.isEmpty) {
+-      return const Center(
+-        child: Padding(
+-          padding: EdgeInsets.all(16),
+-          child: Text('Nenhum notebook encontrado.'),
+-        ),
+-      );
+-    }
+-
+-    return ListView.builder(
+-      itemCount: notebooks.length,
+-      itemBuilder: (context, index) {
+-        final notebook = notebooks[index];
+-        final nome = notebook.name?.isNotEmpty == true
+-            ? notebook.name!
+-            : 'Notebook BLE';
+-
+-        return ListTile(
+-          leading: const Icon(Icons.computer),
+-          title: Text(nome),
+-          subtitle: Text(notebook.deviceId),
+-          trailing: IconButton(
+-            tooltip: 'Conectar',
+-            onPressed: conectando ? null : () => onConectar(notebook),
+-            icon: conectando
+-                ? const SizedBox.square(
+-                    dimension: 20,
+-                    child: CircularProgressIndicator(strokeWidth: 2),
+-                  )
+-                : const Icon(Icons.link),
+-          ),
+-        );
+-      },
+-    );
+-  }
+-}
+-
+ class _Chat extends StatelessWidget {
+   const _Chat({
+     required this.mensagens,
+diff --git a/app/pubspec.lock b/app/pubspec.lock
+index f32f247..30c1c44 100644
+--- a/app/pubspec.lock
++++ b/app/pubspec.lock
+@@ -1,14 +1,6 @@
+ # Generated by pub
+ # See https://dart.dev/tools/pub/glossary#lockfile
+ packages:
+-  args:
+-    dependency: transitive
+-    description:
+-      name: args
+-      sha256: d0481093c50b1da8910eb0bb301626d4d8eb7284aa739614d2b394ee09e3ea04
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.7.0"
+   async:
+     dependency: transitive
+     description:
+@@ -17,14 +9,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "2.13.1"
+-  bluez:
+-    dependency: transitive
+-    description:
+-      name: bluez
+-      sha256: "61a7204381925896a374301498f2f5399e59827c6498ae1e924aaa598751b545"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.8.3"
+   boolean_selector:
+     dependency: transitive
+     description:
+@@ -64,30 +48,6 @@ packages:
+       relative: true
+     source: path
+     version: "1.0.0"
+-  cross_file:
+-    dependency: transitive
+-    description:
+-      name: cross_file
+-      sha256: "28bb3ae56f117b5aec029d702a90f57d285cd975c3c5c281eaca38dbc47c5937"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.3.5+2"
+-  crypto:
+-    dependency: transitive
+-    description:
+-      name: crypto
+-      sha256: c8ea0233063ba03258fbcf2ca4d6dadfefe14f02fab57702265467a19f27fadf
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "3.0.7"
+-  dbus:
+-    dependency: transitive
+-    description:
+-      name: dbus
+-      sha256: "792974a4007974fbc5c1b5433eb2330a9db3e368c3f906253af4c007d0f49a91"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.7.13"
+   fake_async:
+     dependency: transitive
+     description:
+@@ -112,59 +72,11 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "7.0.1"
+-  file_selector_linux:
+-    dependency: transitive
+-    description:
+-      name: file_selector_linux
+-      sha256: "2567f398e06ac72dcf2e98a0c95df2a9edd03c2c2e0cacd4780f20cdf56263a0"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.9.4"
+-  file_selector_macos:
+-    dependency: transitive
+-    description:
+-      name: file_selector_macos
+-      sha256: "5e0bbe9c312416f1787a68259ea1505b52f258c587f12920422671807c4d618a"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.9.5"
+-  file_selector_platform_interface:
+-    dependency: transitive
+-    description:
+-      name: file_selector_platform_interface
+-      sha256: "35e0bd61ebcdb91a3505813b055b09b79dfdc7d0aee9c09a7ba59ae4bb13dc85"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.7.0"
+-  file_selector_windows:
+-    dependency: transitive
+-    description:
+-      name: file_selector_windows
+-      sha256: "62197474ae75893a62df75939c777763d39c2bc5f73ce5b88497208bc269abfd"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.9.3+5"
+-  fixnum:
+-    dependency: transitive
+-    description:
+-      name: fixnum
+-      sha256: b6dc7065e46c974bc7c5f143080a6764ec7a4be6da1285ececdc37be96de53be
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.1.1"
+   flutter:
+     dependency: "direct main"
+     description: flutter
+     source: sdk
+     version: "0.0.0"
+-  flutter_contacts:
+-    dependency: "direct main"
+-    description:
+-      name: flutter_contacts
+-      sha256: "558247c39d89ca738aceb7859b6147a0ede0a5084492cffa215db87dea672479"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.2.0"
+   flutter_lints:
+     dependency: "direct dev"
+     description:
+@@ -173,184 +85,16 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "6.0.0"
+-  flutter_plugin_android_lifecycle:
+-    dependency: transitive
+-    description:
+-      name: flutter_plugin_android_lifecycle
+-      sha256: "38d1c268de9097ff59cf0e844ac38759fc78f76836d37edad06fa21e182055a0"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.0.34"
+   flutter_test:
+     dependency: "direct dev"
+     description: flutter
+     source: sdk
+     version: "0.0.0"
+-  flutter_web_bluetooth:
+-    dependency: transitive
+-    description:
+-      name: flutter_web_bluetooth
+-      sha256: ad26a1b3fef95b86ea5f63793b9a0cdc1a33490f35d754e4e711046cae3ebbf8
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.1.0"
+   flutter_web_plugins:
+     dependency: transitive
+     description: flutter
+     source: sdk
+     version: "0.0.0"
+-  geoclue:
+-    dependency: transitive
+-    description:
+-      name: geoclue
+-      sha256: c2a998c77474fc57aa00c6baa2928e58f4b267649057a1c76738656e9dbd2a7f
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.1.1"
+-  geolocator:
+-    dependency: "direct main"
+-    description:
+-      name: geolocator
+-      sha256: "79939537046c9025be47ec645f35c8090ecadb6fe98eba146a0d25e8c1357516"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "14.0.2"
+-  geolocator_android:
+-    dependency: transitive
+-    description:
+-      name: geolocator_android
+-      sha256: "179c3cb66dfa674fc9ccbf2be872a02658724d1c067634e2c427cf6df7df901a"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "5.0.2"
+-  geolocator_apple:
+-    dependency: transitive
+-    description:
+-      name: geolocator_apple
+-      sha256: dbdd8789d5aaf14cf69f74d4925ad1336b4433a6efdf2fce91e8955dc921bf22
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.3.13"
+-  geolocator_linux:
+-    dependency: transitive
+-    description:
+-      name: geolocator_linux
+-      sha256: d64112a205931926f4363bb6bd48f14cb38e7326833041d170615586cd143797
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.2.4"
+-  geolocator_platform_interface:
+-    dependency: transitive
+-    description:
+-      name: geolocator_platform_interface
+-      sha256: "30cb64f0b9adcc0fb36f628b4ebf4f731a2961a0ebd849f4b56200205056fe67"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "4.2.6"
+-  geolocator_web:
+-    dependency: transitive
+-    description:
+-      name: geolocator_web
+-      sha256: b1ae9bdfd90f861fde8fd4f209c37b953d65e92823cb73c7dee1fa021b06f172
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "4.1.3"
+-  geolocator_windows:
+-    dependency: transitive
+-    description:
+-      name: geolocator_windows
+-      sha256: "175435404d20278ffd220de83c2ca293b73db95eafbdc8131fe8609be1421eb6"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.2.5"
+-  gsettings:
+-    dependency: transitive
+-    description:
+-      name: gsettings
+-      sha256: "1b0ce661f5436d2db1e51f3c4295a49849f03d304003a7ba177d01e3a858249c"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.2.8"
+-  http:
+-    dependency: transitive
+-    description:
+-      name: http
+-      sha256: "87721a4a50b19c7f1d49001e51409bddc46303966ce89a65af4f4e6004896412"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.6.0"
+-  http_parser:
+-    dependency: transitive
+-    description:
+-      name: http_parser
+-      sha256: "178d74305e7866013777bab2c3d8726205dc5a4dd935297175b19a23a2e66571"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "4.1.2"
+-  image_picker:
+-    dependency: "direct main"
+-    description:
+-      name: image_picker
+-      sha256: "91c025426c2881c551100bce834e201c835a170151545f58d17da5180ca7d9ac"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.2.2"
+-  image_picker_android:
+-    dependency: transitive
+-    description:
+-      name: image_picker_android
+-      sha256: d5b3e1774af29c9ab00103afb0d4614070f924d2e0057ac867ec98800114793f
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.8.13+17"
+-  image_picker_for_web:
+-    dependency: transitive
+-    description:
+-      name: image_picker_for_web
+-      sha256: "66257a3191ab360d23a55c8241c91a6e329d31e94efa7be9cf7a212e65850214"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "3.1.1"
+-  image_picker_ios:
+-    dependency: transitive
+-    description:
+-      name: image_picker_ios
+-      sha256: b9c4a438a9ff4f60808c9cf0039b93a42bb6c2211ef6ebb647394b2b3fa84588
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.8.13+6"
+-  image_picker_linux:
+-    dependency: transitive
+-    description:
+-      name: image_picker_linux
+-      sha256: "1f81c5f2046b9ab724f85523e4af65be1d47b038160a8c8deed909762c308ed4"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.2.2"
+-  image_picker_macos:
+-    dependency: transitive
+-    description:
+-      name: image_picker_macos
+-      sha256: "86f0f15a309de7e1a552c12df9ce5b59fe927e71385329355aec4776c6a8ec91"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.2.2+1"
+-  image_picker_platform_interface:
+-    dependency: transitive
+-    description:
+-      name: image_picker_platform_interface
+-      sha256: "567e056716333a1647c64bb6bd873cff7622233a5c3f694be28a583d4715690c"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.11.1"
+-  image_picker_windows:
+-    dependency: transitive
+-    description:
+-      name: image_picker_windows
+-      sha256: d248c86554a72b5495a31c56f060cf73a41c7ff541689327b1a7dbccc33adfae
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.2.2"
+   leak_tracker:
+     dependency: transitive
+     description:
+@@ -383,14 +127,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "6.1.0"
+-  logging:
+-    dependency: transitive
+-    description:
+-      name: logging
+-      sha256: c8245ada5f1717ed44271ed1c26b8ce85ca3228fd2ffdb75468ab01979309d61
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.3.0"
+   matcher:
+     dependency: transitive
+     description:
+@@ -411,18 +147,10 @@ packages:
+     dependency: transitive
+     description:
+       name: meta
+-      sha256: "1741988757a65eb6b36abe716829688cf01910bbf91c34354ff7ec1c3de2b349"
++      sha256: "23f08335362185a5ea2ad3a4e597f1375e78bce8a040df5c600c8d3552ef2394"
+       url: "https://pub.dev"
+     source: hosted
+-    version: "1.18.0"
+-  mime:
+-    dependency: transitive
+-    description:
+-      name: mime
+-      sha256: "41a20518f0cb1256669420fdba0cd90d21561e560ac240f26ef8322e45bb7ed6"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.0.0"
++    version: "1.17.0"
+   nearby_connections:
+     dependency: "direct main"
+     description:
+@@ -431,22 +159,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "4.3.0"
+-  package_info_plus:
+-    dependency: transitive
+-    description:
+-      name: package_info_plus
+-      sha256: "468c26b4254ab01979fa5e4a98cb343ea3631b9acee6f21028997419a80e1a20"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "9.0.1"
+-  package_info_plus_platform_interface:
+-    dependency: transitive
+-    description:
+-      name: package_info_plus_platform_interface
+-      sha256: "202a487f08836a592a6bd4f901ac69b3a8f146af552bbd14407b6b41e1c3f086"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "3.2.1"
+   path:
+     dependency: transitive
+     description:
+@@ -527,14 +239,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "0.2.1"
+-  petitparser:
+-    dependency: transitive
+-    description:
+-      name: petitparser
+-      sha256: "91bd59303e9f769f108f8df05e371341b15d59e995e6806aefab827b58336675"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "7.0.2"
+   platform:
+     dependency: transitive
+     description:
+@@ -656,34 +360,10 @@ packages:
+     dependency: transitive
+     description:
+       name: test_api
+-      sha256: "949a932224383300f01be9221c39180316445ecb8e7547f70a41a35bf421fb9e"
++      sha256: "8161c84903fd860b26bfdefb7963b3f0b68fee7adea0f59ef805ecca346f0c7a"
+       url: "https://pub.dev"
+     source: hosted
+-    version: "0.7.11"
+-  typed_data:
+-    dependency: transitive
+-    description:
+-      name: typed_data
+-      sha256: f9049c039ebfeb4cf7a7104a675823cd72dba8297f264b6637062516699fa006
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.4.0"
+-  universal_ble:
+-    dependency: "direct main"
+-    description:
+-      name: universal_ble
+-      sha256: ff3c4ea34e1360ba593c68f68ff2d0cd598dcb054b0de1d89c0936dbb5dd9707
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.0.2"
+-  uuid:
+-    dependency: transitive
+-    description:
+-      name: uuid
+-      sha256: "1fef9e8e11e2991bb773070d4656b7bd5d850967a2456cfc83cf47925ba79489"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "4.5.3"
++    version: "0.7.10"
+   vector_math:
+     dependency: transitive
+     description:
+@@ -708,14 +388,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "1.1.1"
+-  win32:
+-    dependency: transitive
+-    description:
+-      name: win32
+-      sha256: d7cb55e04cd34096cd3a79b3330245f54cb96a370a1c27adb3c84b917de8b08e
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "5.15.0"
+   xdg_directories:
+     dependency: transitive
+     description:
+@@ -724,14 +396,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "1.1.0"
+-  xml:
+-    dependency: transitive
+-    description:
+-      name: xml
+-      sha256: "67f0aff7be013d107995e9b75bf4e7f2c3ef2dfdb2c8e68024bba0a7fd5756a4"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "7.0.1"
+ sdks:
+-  dart: ">=3.12.0 <4.0.0"
+-  flutter: ">=3.44.0"
++  dart: ">=3.11.5 <4.0.0"
++  flutter: ">=3.35.0"
+diff --git a/app/pubspec.yaml b/app/pubspec.yaml
+index 1de9873..27e3fb5 100644
+--- a/app/pubspec.yaml
++++ b/app/pubspec.yaml
+@@ -15,12 +15,8 @@ dependencies:
+     sdk: flutter
+ 
+   permission_handler: ^12.0.1
+-  flutter_contacts: ^2.2.0
+-  geolocator: ^14.0.2
+-  image_picker: ^1.2.2
+   nearby_connections: ^4.3.0
+   shared_preferences: ^2.5.3
+-  universal_ble: ^2.0.2
+ 
+ dev_dependencies:
+   flutter_test:
+diff --git a/app/test/widget_test.dart b/app/test/widget_test.dart
+index e6cb53b..14e753e 100644
+--- a/app/test/widget_test.dart
++++ b/app/test/widget_test.dart
+@@ -6,6 +6,6 @@ void main() {
+   testWidgets('mostra tela principal de conexao', (tester) async {
+     await tester.pumpWidget(const ConnectionApp());
+ 
+-    expect(find.text('Conexão Bluetooth'), findsOneWidget);
++    expect(find.text('Chat local'), findsOneWidget);
+   });
+ }
+diff --git a/app/lib/core/platform/wifi_direct_service.dart b/app/lib/core/platform/wifi_direct_service.dart
+new file mode 100644
+index 0000000..e7dcbde
+--- /dev/null
++++ b/app/lib/core/platform/wifi_direct_service.dart
+@@ -0,0 +1,166 @@
++import 'dart:async';
++
++import 'package:flutter/services.dart';
++
++class WifiDirectDevice {
++  const WifiDirectDevice({required this.id, required this.name});
++
++  final String id;
++  final String name;
++
++  factory WifiDirectDevice.fromMap(Map<dynamic, dynamic> map) {
++    return WifiDirectDevice(
++      id: map['id'] as String? ?? '',
++      name: map['name'] as String? ?? 'Wi-Fi Direct',
++    );
++  }
++}
++
++sealed class WifiDirectEvent {
++  const WifiDirectEvent();
++}
++
++class WifiDirectPeersChanged extends WifiDirectEvent {
++  const WifiDirectPeersChanged(this.devices);
++
++  final List<WifiDirectDevice> devices;
++}
++
++class WifiDirectDiscoveryChanged extends WifiDirectEvent {
++  const WifiDirectDiscoveryChanged(this.discovering);
++
++  final bool discovering;
++}
++
++class WifiDirectConnected extends WifiDirectEvent {
++  const WifiDirectConnected({required this.id, required this.name});
++
++  final String id;
++  final String name;
++}
++
++class WifiDirectDisconnected extends WifiDirectEvent {
++  const WifiDirectDisconnected(this.id);
++
++  final String id;
++}
++
++class WifiDirectMessageReceived extends WifiDirectEvent {
++  const WifiDirectMessageReceived({
++    required this.id,
++    required this.name,
++    required this.data,
++  });
++
++  final String id;
++  final String name;
++  final Uint8List data;
++}
++
++class WifiDirectError extends WifiDirectEvent {
++  const WifiDirectError(this.message);
++
++  final String message;
++}
++
++class WifiDirectService {
++  WifiDirectService._();
++
++  static const MethodChannel _channel = MethodChannel(
++    'br.sp.gov.cps.dsm.chat/wifi_direct',
++  );
++  static final StreamController<WifiDirectEvent> _events =
++      StreamController<WifiDirectEvent>.broadcast();
++  static bool _initialized = false;
++
++  static Stream<WifiDirectEvent> get events => _events.stream;
++
++  static void initialize() {
++    if (_initialized) return;
++    _initialized = true;
++    _channel.setMethodCallHandler(_handleNativeCall);
++  }
++
++  static Future<void> start({required String deviceName}) async {
++    initialize();
++    await _channel.invokeMethod<void>('start', {'deviceName': deviceName});
++  }
++
++  static Future<void> discover() async {
++    initialize();
++    await _channel.invokeMethod<void>('discover');
++  }
++
++  static Future<void> stopDiscovery() async {
++    initialize();
++    await _channel.invokeMethod<void>('stopDiscovery');
++  }
++
++  static Future<void> connect(String deviceId) async {
++    initialize();
++    await _channel.invokeMethod<void>('connect', {'deviceId': deviceId});
++  }
++
++  static Future<void> sendBytes(String deviceId, Uint8List data) async {
++    initialize();
++    await _channel.invokeMethod<void>('sendBytes', {
++      'deviceId': deviceId,
++      'data': data,
++    });
++  }
++
++  static Future<void> stop() async {
++    initialize();
++    await _channel.invokeMethod<void>('stop');
++  }
++
++  static Future<void> _handleNativeCall(MethodCall call) async {
++    switch (call.method) {
++      case 'peersChanged':
++        final devices = (call.arguments as List<dynamic>? ?? [])
++            .whereType<Map<dynamic, dynamic>>()
++            .map(WifiDirectDevice.fromMap)
++            .where((device) => device.id.isNotEmpty)
++            .toList();
++        _events.add(WifiDirectPeersChanged(devices));
++      case 'discoveryChanged':
++        final args = call.arguments as Map<dynamic, dynamic>? ?? {};
++        _events.add(
++          WifiDirectDiscoveryChanged(args['discovering'] as bool? ?? false),
++        );
++      case 'connected':
++        final args = call.arguments as Map<dynamic, dynamic>? ?? {};
++        final id = args['id'] as String? ?? '';
++        if (id.isNotEmpty) {
++          _events.add(
++            WifiDirectConnected(
++              id: id,
++              name: args['name'] as String? ?? 'Wi-Fi Direct',
++            ),
++          );
++        }
++      case 'disconnected':
++        final args = call.arguments as Map<dynamic, dynamic>? ?? {};
++        final id = args['id'] as String? ?? '';
++        if (id.isNotEmpty) {
++          _events.add(WifiDirectDisconnected(id));
++        }
++      case 'messageReceived':
++        final args = call.arguments as Map<dynamic, dynamic>? ?? {};
++        final id = args['id'] as String? ?? '';
++        final data = args['data'];
++        if (id.isNotEmpty && data is Uint8List) {
++          _events.add(
++            WifiDirectMessageReceived(
++              id: id,
++              name: args['name'] as String? ?? 'Wi-Fi Direct',
++              data: data,
++            ),
++          );
++        }
++      case 'error':
++        final args = call.arguments as Map<dynamic, dynamic>? ?? {};
++        _events.add(WifiDirectError(args['message'] as String? ?? 'Erro'));
++    }
++  }
++}
+diff --git a/app/android/app/src/main/kotlin/com/example/exemplo_quatro/WifiDirectTransport.kt b/app/android/app/src/main/kotlin/com/example/exemplo_quatro/WifiDirectTransport.kt
+new file mode 100644
+index 0000000..138895b
+--- /dev/null
++++ b/app/android/app/src/main/kotlin/com/example/exemplo_quatro/WifiDirectTransport.kt
+@@ -0,0 +1,465 @@
++package com.example.exemplo_quatro
++
++import android.Manifest
++import android.annotation.SuppressLint
++import android.app.Activity
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.content.IntentFilter
++import android.content.pm.PackageManager
++import android.net.NetworkInfo
++import android.net.wifi.WpsInfo
++import android.net.wifi.p2p.WifiP2pConfig
++import android.net.wifi.p2p.WifiP2pDevice
++import android.net.wifi.p2p.WifiP2pDeviceList
++import android.net.wifi.p2p.WifiP2pInfo
++import android.net.wifi.p2p.WifiP2pManager
++import android.os.Build
++import android.os.Handler
++import android.os.Looper
++import io.flutter.plugin.common.MethodCall
++import io.flutter.plugin.common.MethodChannel
++import java.io.BufferedInputStream
++import java.io.DataInputStream
++import java.io.DataOutputStream
++import java.io.EOFException
++import java.net.InetSocketAddress
++import java.net.ServerSocket
++import java.net.Socket
++import java.util.Collections
++import java.util.concurrent.Executors
++
++class WifiDirectTransport(
++    private val activity: Activity,
++    private val methodChannel: MethodChannel,
++) : MethodChannel.MethodCallHandler {
++    private val manager =
++        activity.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
++    private val mainHandler = Handler(Looper.getMainLooper())
++    private val executor = Executors.newCachedThreadPool()
++    private val peers = mutableMapOf<String, WifiP2pDevice>()
++    private val sockets = Collections.synchronizedMap(mutableMapOf<String, Socket>())
++    private val socketNames = Collections.synchronizedMap(mutableMapOf<String, String>())
++    private val intentFilter = IntentFilter().apply {
++        addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
++        addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
++        addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
++        addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
++    }
++
++    private var wifiChannel: WifiP2pManager.Channel? = null
++    private var receiverRegistered = false
++    private var serverSocket: ServerSocket? = null
++    private var serverRunning = false
++    private var localName = "Aparelho"
++    private var pendingPeerAddress: String? = null
++    private var pendingPeerName: String? = null
++    private var discovering = false
++
++    private val receiver = object : BroadcastReceiver() {
++        override fun onReceive(context: Context, intent: Intent) {
++            when (intent.action) {
++                WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
++                    val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
++                    if (state != WifiP2pManager.WIFI_P2P_STATE_ENABLED) {
++                        emitError("Wi-Fi Direct indisponivel neste aparelho.")
++                    }
++                }
++
++                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> requestPeers()
++                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
++                    val networkInfo = intent.networkInfoExtra()
++                    if (networkInfo?.isConnected == true) {
++                        requestConnectionInfo()
++                    }
++                }
++            }
++        }
++    }
++
++    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
++        when (call.method) {
++            "start" -> start(call, result)
++            "discover" -> discover(result)
++            "stopDiscovery" -> stopDiscovery(result)
++            "connect" -> connect(call, result)
++            "sendBytes" -> sendBytes(call, result)
++            "stop" -> stop(result)
++            else -> result.notImplemented()
++        }
++    }
++
++    fun dispose() {
++        stopInternal(removeGroup = false)
++        executor.shutdownNow()
++    }
++
++    private fun start(call: MethodCall, result: MethodChannel.Result) {
++        val deviceName = call.argument<String>("deviceName")?.trim()
++        if (!deviceName.isNullOrEmpty()) {
++            localName = deviceName
++        }
++
++        if (manager == null) {
++            result.error("wifi_direct_unavailable", "WifiP2pManager indisponivel.", null)
++            return
++        }
++
++        if (wifiChannel == null) {
++            wifiChannel = manager.initialize(activity.applicationContext, activity.mainLooper) {
++                emitError("Canal Wi-Fi Direct desconectado.")
++            }
++        }
++
++        if (!receiverRegistered) {
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++                activity.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
++            } else {
++                @Suppress("DEPRECATION")
++                activity.registerReceiver(receiver, intentFilter)
++            }
++            receiverRegistered = true
++        }
++
++        startServer()
++        result.success(null)
++    }
++
++    @SuppressLint("MissingPermission")
++    private fun discover(result: MethodChannel.Result) {
++        val manager = manager
++        val channel = wifiChannel
++        if (manager == null || channel == null) {
++            result.error("wifi_direct_not_started", "Inicie o Wi-Fi Direct antes da busca.", null)
++            return
++        }
++        if (!hasWifiDirectPermission()) {
++            result.error("wifi_direct_permission", "Permissao de Wi-Fi Direct ausente.", null)
++            return
++        }
++
++        manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
++            override fun onSuccess() {
++                discovering = true
++                emit("discoveryChanged", mapOf("discovering" to true))
++                result.success(null)
++            }
++
++            override fun onFailure(reason: Int) {
++                discovering = false
++                emit("discoveryChanged", mapOf("discovering" to false))
++                result.error(
++                    "wifi_direct_discover_failed",
++                    "Falha ao buscar Wi-Fi Direct: $reason",
++                    null,
++                )
++            }
++        })
++    }
++
++    @SuppressLint("MissingPermission")
++    private fun stopDiscovery(result: MethodChannel.Result) {
++        val manager = manager
++        val channel = wifiChannel
++        if (manager == null || channel == null) {
++            result.success(null)
++            return
++        }
++
++        manager.stopPeerDiscovery(channel, object : WifiP2pManager.ActionListener {
++            override fun onSuccess() {
++                discovering = false
++                emit("discoveryChanged", mapOf("discovering" to false))
++                result.success(null)
++            }
++
++            override fun onFailure(reason: Int) {
++                discovering = false
++                emit("discoveryChanged", mapOf("discovering" to false))
++                result.success(null)
++            }
++        })
++    }
++
++    @SuppressLint("MissingPermission")
++    private fun connect(call: MethodCall, result: MethodChannel.Result) {
++        val deviceId = call.argument<String>("deviceId")
++        val manager = manager
++        val channel = wifiChannel
++        if (deviceId.isNullOrEmpty() || manager == null || channel == null) {
++            result.error("wifi_direct_invalid_peer", "Dispositivo Wi-Fi Direct invalido.", null)
++            return
++        }
++        if (!hasWifiDirectPermission()) {
++            result.error("wifi_direct_permission", "Permissao de Wi-Fi Direct ausente.", null)
++            return
++        }
++
++        pendingPeerAddress = deviceId
++        pendingPeerName = peers[deviceId]?.deviceName?.takeIf { it.isNotBlank() }
++            ?: "Wi-Fi Direct"
++
++        val config = WifiP2pConfig().apply {
++            deviceAddress = deviceId
++            wps.setup = WpsInfo.PBC
++        }
++
++        manager.connect(channel, config, object : WifiP2pManager.ActionListener {
++            override fun onSuccess() {
++                result.success(null)
++            }
++
++            override fun onFailure(reason: Int) {
++                pendingPeerAddress = null
++                pendingPeerName = null
++                result.error(
++                    "wifi_direct_connect_failed",
++                    "Falha ao conectar por Wi-Fi Direct: $reason",
++                    null,
++                )
++            }
++        })
++    }
++
++    private fun sendBytes(call: MethodCall, result: MethodChannel.Result) {
++        val deviceId = call.argument<String>("deviceId")
++        val data = call.argument<ByteArray>("data")
++        if (deviceId.isNullOrEmpty() || data == null) {
++            result.error("wifi_direct_invalid_payload", "Mensagem Wi-Fi Direct invalida.", null)
++            return
++        }
++
++        val socket = sockets[deviceId]
++        if (socket == null || socket.isClosed) {
++            result.error("wifi_direct_not_connected", "Dispositivo Wi-Fi Direct desconectado.", null)
++            return
++        }
++
++        executor.execute {
++            try {
++                synchronized(socket) {
++                    val output = DataOutputStream(socket.getOutputStream())
++                    output.writeInt(data.size)
++                    output.write(data)
++                    output.flush()
++                }
++                mainHandler.post { result.success(null) }
++            } catch (error: Exception) {
++                closeConnection(deviceId)
++                mainHandler.post {
++                    result.error(
++                        "wifi_direct_send_failed",
++                        "Falha ao enviar por Wi-Fi Direct: ${error.message}",
++                        null,
++                    )
++                }
++            }
++        }
++    }
++
++    private fun stop(result: MethodChannel.Result) {
++        stopInternal(removeGroup = true)
++        result.success(null)
++    }
++
++    @SuppressLint("MissingPermission")
++    private fun requestPeers() {
++        val manager = manager
++        val channel = wifiChannel
++        if (manager == null || channel == null || !hasWifiDirectPermission()) return
++
++        manager.requestPeers(channel) { list: WifiP2pDeviceList ->
++            peers.clear()
++            val devices = list.deviceList.mapNotNull { device ->
++                val address = device.deviceAddress ?: return@mapNotNull null
++                peers[address] = device
++                mapOf(
++                    "id" to address,
++                    "name" to (device.deviceName?.takeIf { it.isNotBlank() } ?: address),
++                )
++            }
++            emit("peersChanged", devices)
++        }
++    }
++
++    @SuppressLint("MissingPermission")
++    private fun requestConnectionInfo() {
++        val manager = manager
++        val channel = wifiChannel
++        if (manager == null || channel == null || !hasWifiDirectPermission()) return
++
++        manager.requestConnectionInfo(channel) { info: WifiP2pInfo ->
++            if (!info.groupFormed) return@requestConnectionInfo
++            startServer()
++            if (!info.isGroupOwner && info.groupOwnerAddress != null) {
++                connectToGroupOwner(info.groupOwnerAddress.hostAddress)
++            }
++        }
++    }
++
++    private fun startServer() {
++        if (serverRunning) return
++        serverRunning = true
++
++        executor.execute {
++            try {
++                val server = ServerSocket(PORT)
++                serverSocket = server
++                while (serverRunning) {
++                    val socket = server.accept()
++                    val host = socket.inetAddress.hostAddress ?: socket.remoteSocketAddress.toString()
++                    val id = "ip:$host"
++                    val name = "Wi-Fi Direct $host"
++                    registerSocket(id, name, socket)
++                }
++            } catch (_: Exception) {
++                if (serverRunning) {
++                    emitError("Servidor Wi-Fi Direct encerrado.")
++                }
++            } finally {
++                serverRunning = false
++            }
++        }
++    }
++
++    private fun connectToGroupOwner(host: String?) {
++        if (host.isNullOrEmpty()) return
++
++        executor.execute {
++            try {
++                val socket = Socket()
++                socket.bind(null)
++                socket.connect(InetSocketAddress(host, PORT), SOCKET_TIMEOUT_MS)
++                val id = pendingPeerAddress ?: "ip:$host"
++                val name = pendingPeerName ?: "Wi-Fi Direct $host"
++                registerSocket(id, name, socket)
++            } catch (error: Exception) {
++                emitError("Falha no socket Wi-Fi Direct: ${error.message}")
++            }
++        }
++    }
++
++    private fun registerSocket(id: String, name: String, socket: Socket) {
++        sockets.remove(id)?.close()
++        sockets[id] = socket
++        socketNames[id] = name
++        emit("connected", mapOf("id" to id, "name" to name))
++
++        executor.execute {
++            try {
++                val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
++                while (!socket.isClosed) {
++                    val length = input.readInt()
++                    if (length <= 0 || length > MAX_PACKET_BYTES) {
++                        throw IllegalArgumentException("Pacote Wi-Fi Direct invalido.")
++                    }
++                    val data = ByteArray(length)
++                    input.readFully(data)
++                    emit(
++                        "messageReceived",
++                        mapOf("id" to id, "name" to name, "data" to data),
++                    )
++                }
++            } catch (_: EOFException) {
++                closeConnection(id)
++            } catch (_: Exception) {
++                closeConnection(id)
++            }
++        }
++    }
++
++    private fun closeConnection(id: String) {
++        sockets.remove(id)?.close()
++        socketNames.remove(id)
++        emit("disconnected", mapOf("id" to id))
++    }
++
++    private fun stopInternal(removeGroup: Boolean) {
++        if (discovering) {
++            val manager = manager
++            val channel = wifiChannel
++            if (manager != null && channel != null) {
++                try {
++                    manager.stopPeerDiscovery(channel, null)
++                } catch (_: Exception) {
++                }
++            }
++        }
++        discovering = false
++        emit("discoveryChanged", mapOf("discovering" to false))
++
++        serverRunning = false
++        serverSocket?.close()
++        serverSocket = null
++
++        for (id in sockets.keys.toList()) {
++            closeConnection(id)
++        }
++        peers.clear()
++        emit("peersChanged", emptyList<Map<String, String>>())
++
++        if (receiverRegistered) {
++            try {
++                activity.unregisterReceiver(receiver)
++            } catch (_: Exception) {
++            }
++            receiverRegistered = false
++        }
++
++        if (removeGroup) {
++            val manager = manager
++            val channel = wifiChannel
++            if (manager != null && channel != null) {
++                try {
++                    manager.removeGroup(channel, null)
++                } catch (_: Exception) {
++                }
++            }
++        }
++    }
++
++    private fun hasWifiDirectPermission(): Boolean {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
++            return true
++        }
++
++        val locationGranted =
++            activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
++                PackageManager.PERMISSION_GRANTED
++
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
++            return locationGranted
++        }
++
++        val nearbyWifiGranted =
++            activity.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) ==
++                PackageManager.PERMISSION_GRANTED
++        return locationGranted || nearbyWifiGranted
++    }
++
++    private fun emit(method: String, arguments: Any?) {
++        mainHandler.post {
++            methodChannel.invokeMethod(method, arguments)
++        }
++    }
++
++    private fun emitError(message: String) {
++        emit("error", mapOf("message" to message))
++    }
++
++    @Suppress("DEPRECATION")
++    private fun Intent.networkInfoExtra(): NetworkInfo? {
++        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO, NetworkInfo::class.java)
++        } else {
++            getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
++        }
++    }
++
++    companion object {
++        private const val PORT = 8988
++        private const val SOCKET_TIMEOUT_MS = 8500
++        private const val MAX_PACKET_BYTES = 1024 * 1024
++    }
++}

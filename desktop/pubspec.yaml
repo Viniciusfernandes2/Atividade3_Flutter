@@ -1,0 +1,25 @@
+name: connection_desktop
+description: Chat Bluetooth desktop para comunicacao local por BLE.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  connection_shared:
+    path: ../shared
+
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.5.3
+  universal_ble: ^2.0.2
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

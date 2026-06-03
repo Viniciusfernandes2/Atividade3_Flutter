@@ -1,0 +1,839 @@
+﻿diff --git a/app/lib/features/connection/connection_screen.dart b/app/lib/features/connection/connection_screen.dart
+index 27804aa..f2b3c52 100644
+--- a/app/lib/features/connection/connection_screen.dart
++++ b/app/lib/features/connection/connection_screen.dart
+@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
+ import 'package:nearby_connections/nearby_connections.dart';
+ import 'package:permission_handler/permission_handler.dart';
+ import 'package:shared_preferences/shared_preferences.dart';
+-import 'package:universal_ble/universal_ble.dart';
+ 
+ import '../../core/platform/connection_foreground_service.dart';
+ 
+@@ -23,18 +22,13 @@ class ConnectionScreen extends StatefulWidget {
+   State<ConnectionScreen> createState() => _ConnectionScreenState();
+ }
+ 
+-enum _AcaoMenu { editarNome, buscarCelulares, buscarNotebooks }
++enum _AcaoMenu { editarNome, buscarCelulares }
+ 
+-enum _TipoConversa { celular, notebookCentral, notebookPeripheral }
++enum _TipoConversa { celular }
+ 
+ class _ConnectionScreenState extends State<ConnectionScreen>
+     with WidgetsBindingObserver {
+   static const String _serviceId = 'br.sp.gov.cps.dsm.chat';
+-  static const String _serviceUuid = '07eab2e6-fc51-5e32-a09b-788f502b8ed7';
+-  static const String _messageCharacteristicUuid =
+-      '6dff0753-7a8e-57d7-9858-f4f4c781cb81';
+-  static const String _notifyCharacteristicUuid =
+-      '8bc8e5cf-54eb-59ff-a05d-f94177f07f8d';
+   static const String _nomeUsuarioPrefsKey = 'connection_user_name';
+   static const String _mensagensPrefsKey = 'connection_messages';
+   static const Strategy _strategy = Strategy.P2P_CLUSTER;
+@@ -42,9 +36,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   final TextEditingController _mensagemController = TextEditingController();
+   final List<_AparelhoEncontrado> _aparelhosEncontrados = [];
+   final Map<String, ConnectionInfo> _aparelhosConectados = {};
+-  final Map<String, BleDevice> _notebooksEncontrados = {};
+-  final Map<String, BleDevice> _notebooksConectados = {};
+-  final Map<String, String> _clientesBlePeripheral = {};
+   final List<_MensagemChat> _mensagens = [];
+   final List<StreamSubscription<dynamic>> _subscriptions = [];
+ 
+@@ -52,12 +43,9 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   VoidCallback? _atualizarModalBusca;
+ 
+   bool _anunciando = false;
+-  bool _anunciandoBle = false;
+   bool _alternandoDisponibilidade = false;
+   bool _procurando = false;
+-  bool _procurandoBle = false;
+   bool _conectando = false;
+-  bool _conectandoBle = false;
+   bool _appEmPrimeiroPlano = true;
+   String? _mensagemErro;
+   late String _nomeUsuario;
+@@ -67,7 +55,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     super.initState();
+     WidgetsBinding.instance.addObserver(this);
+     _nomeUsuario = 'Aparelho ${Random().nextInt(9000) + 1000}';
+-    _configurarBle();
+     unawaited(_inicializarDisponibilidade());
+   }
+ 
+@@ -133,7 +120,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     final nomeNormalizado = nome?.trim();
+     if (nomeNormalizado == null || nomeNormalizado.isEmpty || !mounted) return;
+ 
+-    final estavaDisponivel = _anunciando || _anunciandoBle;
++    final estavaDisponivel = _anunciando;
+     if (estavaDisponivel) {
+       await _pararAnuncio();
+     }
+@@ -150,7 +137,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   }
+ 
+   Future<void> _garantirDisponibilidade() async {
+-    if (_anunciando || _anunciandoBle || _alternandoDisponibilidade) return;
++    if (_anunciando || _alternandoDisponibilidade) return;
+     setState(() {
+       _mensagemErro = null;
+       _alternandoDisponibilidade = true;
+@@ -173,95 +160,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     }
+   }
+ 
+-  void _configurarBle() {
+-    UniversalBle.timeout = const Duration(seconds: 12);
+-
+-    _subscriptions.add(
+-      UniversalBle.scanStream.listen((device) {
+-        if (!mounted || _notebooksConectados.containsKey(device.deviceId)) {
+-          return;
+-        }
+-
+-        setState(() {
+-          _notebooksEncontrados[device.deviceId] = device;
+-        });
+-        _atualizarModalBusca?.call();
+-      }),
+-    );
+-
+-    UniversalBle.onConnectionChange = (deviceId, isConnected, error) {
+-      if (!mounted) return;
+-
+-      setState(() {
+-        if (!isConnected) {
+-          final chave = _chaveNotebookCentral(deviceId);
+-          final nome =
+-              _notebooksConectados.remove(deviceId)?.name ?? 'Notebook';
+-          if (_conversaSelecionadaId == chave) {
+-            _conversaSelecionadaId = null;
+-          }
+-          _mostrarMensagem('$nome desconectou.');
+-        }
+-        if (error != null && error.isNotEmpty) {
+-          _mensagemErro = error;
+-        }
+-      });
+-    };
+-
+-    UniversalBle.onValueChange = (deviceId, characteristicId, value, _) {
+-      if (characteristicId.toLowerCase() != _notifyCharacteristicUuid) return;
+-      _adicionarMensagemBle(deviceId, value);
+-    };
+-
+-    UniversalBlePeripheral.setWriteRequestHandlers((
+-      deviceId,
+-      characteristicId,
+-      offset,
+-      value,
+-    ) {
+-      if (characteristicId.toLowerCase() == _messageCharacteristicUuid &&
+-          value != null) {
+-        _adicionarMensagemBle(deviceId, value);
+-      }
+-      return PeripheralWriteRequestResult();
+-    });
+-
+-    UniversalBlePeripheral.setReadRequestHandlers(
+-      (_, _, _, value) =>
+-          PeripheralReadRequestResult(value: value ?? Uint8List(0)),
+-    );
+-
+-    _subscriptions.add(
+-      UniversalBlePeripheral.connectionStateStream.listen((event) {
+-        if (!mounted) return;
+-        setState(() {
+-          if (event.connected) {
+-            _clientesBlePeripheral[event.deviceId] = event.deviceId;
+-          } else {
+-            final chave = _chaveNotebookPeripheral(event.deviceId);
+-            final nome =
+-                _clientesBlePeripheral.remove(event.deviceId) ?? 'Notebook';
+-            if (_conversaSelecionadaId == chave) {
+-              _conversaSelecionadaId = null;
+-            }
+-            _mostrarMensagem('$nome desconectou.');
+-          }
+-        });
+-      }),
+-    );
+-
+-    _subscriptions.add(
+-      UniversalBlePeripheral.advertisingStateStream.listen((event) {
+-        if (!mounted) return;
+-        setState(() {
+-          _anunciandoBle =
+-              event.state == PeripheralAdvertisingState.advertising;
+-          _mensagemErro = event.error;
+-        });
+-      }),
+-    );
+-  }
+-
+   @override
+   void dispose() {
+     WidgetsBinding.instance.removeObserver(this);
+@@ -272,12 +170,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     Nearby().stopAdvertising();
+     Nearby().stopDiscovery();
+     Nearby().stopAllEndpoints();
+-    UniversalBle.stopScan();
+-    UniversalBlePeripheral.stopAdvertising();
+-    UniversalBlePeripheral.clearServices();
+-    for (final deviceId in _notebooksConectados.keys.toList()) {
+-      unawaited(UniversalBle.disconnect(deviceId));
+-    }
+     super.dispose();
+   }
+ 
+@@ -310,12 +202,9 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+ 
+   Future<void> _pararAnuncio() async {
+     await Nearby().stopAdvertising();
+-    await UniversalBlePeripheral.stopAdvertising();
+-    await UniversalBlePeripheral.clearServices();
+     if (!mounted) return;
+     setState(() {
+       _anunciando = false;
+-      _anunciandoBle = false;
+     });
+   }
+ 
+@@ -324,8 +213,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+ 
+     await ConnectionForegroundService.start();
+ 
+-    final iniciadoBle = await _iniciarAnuncioBle();
+-
+     var iniciado = false;
+     try {
+       iniciado = await Nearby().startAdvertising(
+@@ -344,67 +231,9 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     if (!mounted) return;
+     setState(() {
+       _anunciando = iniciado;
+-      _anunciandoBle = iniciadoBle;
+     });
+   }
+ 
+-  Future<bool> _iniciarAnuncioBle() async {
+-    try {
+-      final caps = await UniversalBlePeripheral.getCapabilities();
+-      if (!caps.supportsPeripheralMode) {
+-        _definirErro('Este celular não suporta modo periférico BLE.');
+-        return false;
+-      }
+-
+-      final readiness = await UniversalBlePeripheral.getAvailabilityState();
+-      if (readiness != PeripheralReadinessState.ready) {
+-        _definirErro('Bluetooth indisponível para BLE: ${readiness.name}.');
+-        return false;
+-      }
+-
+-      await UniversalBlePeripheral.clearServices();
+-      await UniversalBlePeripheral.addService(
+-        BlePeripheralService(
+-          uuid: _serviceUuid,
+-          primary: true,
+-          characteristics: [
+-            BlePeripheralCharacteristic(
+-              uuid: _messageCharacteristicUuid,
+-              properties: [
+-                CharacteristicProperty.write,
+-                CharacteristicProperty.writeWithoutResponse,
+-              ],
+-              permissions: [PeripheralAttributePermission.writeable],
+-            ),
+-            BlePeripheralCharacteristic(
+-              uuid: _notifyCharacteristicUuid,
+-              properties: [
+-                CharacteristicProperty.read,
+-                CharacteristicProperty.notify,
+-              ],
+-              permissions: [
+-                PeripheralAttributePermission.readable,
+-                PeripheralAttributePermission.writeable,
+-              ],
+-            ),
+-          ],
+-        ),
+-      );
+-
+-      await UniversalBlePeripheral.startAdvertising(
+-        services: await UniversalBlePeripheral.getServices(),
+-        localName: null,
+-      );
+-      return true;
+-    } catch (erro) {
+-      if (_erroJaEstaAnunciando(erro)) {
+-        return true;
+-      }
+-      _definirErro('Não foi possível anunciar por BLE: $erro');
+-      return false;
+-    }
+-  }
+-
+   bool _erroJaEstaAnunciando(Object erro) {
+     final texto = erro.toString();
+     return texto.contains('STATUS_ALREADY_ADVERTISING') ||
+@@ -463,91 +292,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     }
+   }
+ 
+-  Future<void> _alternarBuscaBle() async {
+-    setState(() {
+-      _mensagemErro = null;
+-    });
+-
+-    if (_procurandoBle) {
+-      await UniversalBle.stopScan();
+-      if (!mounted) return;
+-      setState(() {
+-        _procurandoBle = false;
+-      });
+-      return;
+-    }
+-
+-    if (!await _pedirPermissoes()) return;
+-
+-    try {
+-      await UniversalBle.requestPermissions();
+-      if (!mounted) return;
+-
+-      setState(() {
+-        _notebooksEncontrados.clear();
+-        _procurandoBle = true;
+-      });
+-
+-      await UniversalBle.startScan(
+-        scanFilter: ScanFilter(withServices: [_serviceUuid]),
+-      );
+-    } catch (erro) {
+-      if (mounted) {
+-        setState(() {
+-          _procurandoBle = false;
+-        });
+-      }
+-      _definirErro('Não foi possível procurar notebooks BLE: $erro');
+-    }
+-  }
+-
+-  Future<void> _conectarBle(BleDevice notebook) async {
+-    if (_conectandoBle) return;
+-
+-    try {
+-      setState(() {
+-        _conectandoBle = true;
+-        _mensagemErro = null;
+-      });
+-
+-      if (_procurandoBle) {
+-        await UniversalBle.stopScan();
+-      }
+-
+-      await UniversalBle.connect(notebook.deviceId);
+-      await UniversalBle.discoverServices(
+-        notebook.deviceId,
+-        withDescriptors: true,
+-      );
+-      await UniversalBle.subscribeNotifications(
+-        notebook.deviceId,
+-        _serviceUuid,
+-        _notifyCharacteristicUuid,
+-      );
+-
+-      if (!mounted) return;
+-      setState(() {
+-        _procurandoBle = false;
+-        _notebooksEncontrados.remove(notebook.deviceId);
+-        _notebooksConectados[notebook.deviceId] = notebook;
+-        _conversaSelecionadaId = _chaveNotebookCentral(notebook.deviceId);
+-      });
+-      unawaited(
+-        _reenviarMensagensPendentes(_chaveNotebookCentral(notebook.deviceId)),
+-      );
+-      _atualizarModalBusca?.call();
+-      _mostrarMensagem('Notebook conectado.');
+-    } catch (erro) {
+-      _definirErro('Falha ao conectar no notebook. Busque novamente. $erro');
+-    } finally {
+-      if (mounted) {
+-        setState(() {
+-          _conectandoBle = false;
+-        });
+-      }
+-    }
+-  }
+-
+   Future<void> _conectar(_AparelhoEncontrado aparelho) async {
+     if (_conectando) return;
+ 
+@@ -722,18 +466,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+       switch (conversa.tipo) {
+         case _TipoConversa.celular:
+           await Nearby().sendBytesPayload(conversa.deviceId, bytes);
+-        case _TipoConversa.notebookCentral:
+-          await UniversalBle.write(
+-            conversa.deviceId,
+-            _serviceUuid,
+-            _messageCharacteristicUuid,
+-            bytes,
+-          );
+-        case _TipoConversa.notebookPeripheral:
+-          await UniversalBlePeripheral.updateCharacteristicValue(
+-            characteristicId: _notifyCharacteristicUuid,
+-            value: bytes,
+-          );
+       }
+       _atualizarStatusMensagem(mensagemId, MessageStatus.recebida);
+     } catch (erro) {
+@@ -761,20 +493,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     unawaited(_persistirMensagens());
+   }
+ 
+-  void _adicionarMensagemBle(String deviceId, Uint8List value) {
+-    final texto = utf8.decode(value, allowMalformed: true).trim();
+-    if (texto.isEmpty || !mounted) return;
+-
+-    final nome =
+-        _notebooksConectados[deviceId]?.name ??
+-        _clientesBlePeripheral[deviceId] ??
+-        'Notebook';
+-    final conversaId = _notebooksConectados.containsKey(deviceId)
+-        ? _chaveNotebookCentral(deviceId)
+-        : _chaveNotebookPeripheral(deviceId);
+-    _processarPacotesRecebidos(texto, conversaId, nome);
+-  }
+-
+   void _marcarConversaComoAberta(String conversaId) {
+     if (!mounted || !_conversaEstaAberta(conversaId)) return;
+     var alterou = false;
+@@ -811,18 +529,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     switch (conversa.tipo) {
+       case _TipoConversa.celular:
+         await Nearby().sendBytesPayload(conversa.deviceId, bytes);
+-      case _TipoConversa.notebookCentral:
+-        await UniversalBle.write(
+-          conversa.deviceId,
+-          _serviceUuid,
+-          _messageCharacteristicUuid,
+-          bytes,
+-        );
+-      case _TipoConversa.notebookPeripheral:
+-        await UniversalBlePeripheral.updateCharacteristicValue(
+-          characteristicId: _notifyCharacteristicUuid,
+-          value: bytes,
+-        );
+     }
+   }
+ 
+@@ -844,18 +550,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     switch (conversa.tipo) {
+       case _TipoConversa.celular:
+         await Nearby().sendBytesPayload(conversa.deviceId, bytes);
+-      case _TipoConversa.notebookCentral:
+-        await UniversalBle.write(
+-          conversa.deviceId,
+-          _serviceUuid,
+-          _messageCharacteristicUuid,
+-          bytes,
+-        );
+-      case _TipoConversa.notebookPeripheral:
+-        await UniversalBlePeripheral.updateCharacteristicValue(
+-          characteristicId: _notifyCharacteristicUuid,
+-          value: bytes,
+-        );
+     }
+ 
+     for (final mensagem in pendentes) {
+@@ -864,8 +558,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+   }
+ 
+   String _chaveCelular(String id) => 'celular:$id';
+-  String _chaveNotebookCentral(String id) => 'notebook-central:$id';
+-  String _chaveNotebookPeripheral(String id) => 'notebook-peripheral:$id';
+ 
+   List<_Conversa> get _conversas {
+     return [
+@@ -878,26 +570,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+           tipo: _TipoConversa.celular,
+           icone: Icons.smartphone,
+         ),
+-      for (final entry in _notebooksConectados.entries)
+-        _Conversa(
+-          id: _chaveNotebookCentral(entry.key),
+-          deviceId: entry.key,
+-          nome: entry.value.name?.isNotEmpty == true
+-              ? entry.value.name!
+-              : 'Notebook BLE',
+-          subtitulo: 'Notebook',
+-          tipo: _TipoConversa.notebookCentral,
+-          icone: Icons.computer,
+-        ),
+-      for (final entry in _clientesBlePeripheral.entries)
+-        _Conversa(
+-          id: _chaveNotebookPeripheral(entry.key),
+-          deviceId: entry.key,
+-          nome: 'Notebook BLE',
+-          subtitulo: 'Notebook',
+-          tipo: _TipoConversa.notebookPeripheral,
+-          icone: Icons.computer,
+-        ),
+     ];
+   }
+ 
+@@ -960,46 +632,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     }
+   }
+ 
+-  Future<void> _abrirBuscaNotebooks() async {
+-    if (!_procurandoBle) {
+-      await _alternarBuscaBle();
+-    }
+-    if (!mounted) return;
+-
+-    await showModalBottomSheet<void>(
+-      context: context,
+-      showDragHandle: true,
+-      builder: (context) {
+-        return StatefulBuilder(
+-          builder: (context, setModalState) {
+-            _atualizarModalBusca = () => setModalState(() {});
+-            return _ModalBuscaNotebooks(
+-              notebooks: _notebooksEncontrados.values.toList(),
+-              conectando: _conectandoBle,
+-              onConectar: (notebook) async {
+-                await _conectarBle(notebook);
+-                if (context.mounted && Navigator.of(context).canPop()) {
+-                  Navigator.of(context).pop();
+-                }
+-              },
+-            );
+-          },
+-        );
+-      },
+-    );
+-
+-    _atualizarModalBusca = null;
+-    if (_procurandoBle) {
+-      await UniversalBle.stopScan();
+-      if (mounted) {
+-        setState(() => _procurandoBle = false);
+-      }
+-    }
+-    if (mounted) {
+-      await _garantirDisponibilidade();
+-    }
+-  }
+-
+   void _definirErro(String mensagem) {
+     if (!mounted) return;
+     setState(() {
+@@ -1036,8 +668,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+                   _abrirEdicaoNome();
+                 case _AcaoMenu.buscarCelulares:
+                   _abrirBuscaCelulares();
+-                case _AcaoMenu.buscarNotebooks:
+-                  _abrirBuscaNotebooks();
+               }
+             },
+             itemBuilder: (context) => [
+@@ -1057,14 +687,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+                   contentPadding: EdgeInsets.zero,
+                 ),
+               ),
+-              const PopupMenuItem(
+-                value: _AcaoMenu.buscarNotebooks,
+-                child: ListTile(
+-                  leading: Icon(Icons.computer),
+-                  title: Text('Buscar notebooks'),
+-                  contentPadding: EdgeInsets.zero,
+-                ),
+-              ),
+             ],
+           ),
+         ],
+@@ -1086,9 +708,7 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+                       conversas: _conversas,
+                       mensagens: _mensagens,
+                       nomeUsuario: _nomeUsuario,
+-                      disponivel: _anunciando || _anunciandoBle,
+-                      nearbyDisponivel: _anunciando,
+-                      bleDisponivel: _anunciandoBle,
++                      disponivel: _anunciando,
+                       onSelecionar: (conversa) {
+                         setState(() => _conversaSelecionadaId = conversa.id);
+                         _marcarConversaComoAberta(conversa.id);
+diff --git a/app/lib/features/connection/widgets/connection_widgets.dart b/app/lib/features/connection/widgets/connection_widgets.dart
+index 83c9dbe..2401ac8 100644
+--- a/app/lib/features/connection/widgets/connection_widgets.dart
++++ b/app/lib/features/connection/widgets/connection_widgets.dart
+@@ -60,8 +60,6 @@ class _ListaConversas extends StatelessWidget {
+     required this.mensagens,
+     required this.nomeUsuario,
+     required this.disponivel,
+-    required this.nearbyDisponivel,
+-    required this.bleDisponivel,
+     required this.onSelecionar,
+   });
+ 
+@@ -69,8 +67,6 @@ class _ListaConversas extends StatelessWidget {
+   final List<_MensagemChat> mensagens;
+   final String nomeUsuario;
+   final bool disponivel;
+-  final bool nearbyDisponivel;
+-  final bool bleDisponivel;
+   final ValueChanged<_Conversa> onSelecionar;
+ 
+   @override
+@@ -92,7 +88,7 @@ class _ListaConversas extends StatelessWidget {
+               const SizedBox(height: 8),
+               Text(
+                 disponivel
+-                    ? 'Celulares: ${nearbyDisponivel ? 'disponível' : 'indisponível'} | Notebooks: ${bleDisponivel ? 'disponível' : 'indisponível'}'
++                    ? 'Celulares: disponível'
+                     : 'Use o menu para ficar disponível ou buscar dispositivos.',
+                 textAlign: TextAlign.center,
+               ),
+@@ -180,52 +176,6 @@ class _ModalBuscaCelulares extends StatelessWidget {
+   }
+ }
+ 
+-class _ModalBuscaNotebooks extends StatelessWidget {
+-  const _ModalBuscaNotebooks({
+-    required this.notebooks,
+-    required this.conectando,
+-    required this.onConectar,
+-  });
+-
+-  final List<BleDevice> notebooks;
+-  final bool conectando;
+-  final ValueChanged<BleDevice> onConectar;
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return SizedBox(
+-      height: MediaQuery.sizeOf(context).height * 0.65,
+-      child: Column(
+-        children: [
+-          Padding(
+-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+-            child: Row(
+-              children: [
+-                Text(
+-                  'Buscar notebooks',
+-                  style: Theme.of(context).textTheme.titleLarge,
+-                ),
+-                const Spacer(),
+-                const SizedBox.square(
+-                  dimension: 20,
+-                  child: CircularProgressIndicator(strokeWidth: 2),
+-                ),
+-              ],
+-            ),
+-          ),
+-          Expanded(
+-            child: _ListaNotebooks(
+-              notebooks: notebooks,
+-              conectando: conectando,
+-              onConectar: onConectar,
+-            ),
+-          ),
+-        ],
+-      ),
+-    );
+-  }
+-}
+-
+ class _ListaAparelhos extends StatelessWidget {
+   const _ListaAparelhos({
+     required this.aparelhos,
+@@ -273,56 +223,6 @@ class _ListaAparelhos extends StatelessWidget {
+   }
+ }
+ 
+-class _ListaNotebooks extends StatelessWidget {
+-  const _ListaNotebooks({
+-    required this.notebooks,
+-    required this.conectando,
+-    required this.onConectar,
+-  });
+-
+-  final List<BleDevice> notebooks;
+-  final bool conectando;
+-  final ValueChanged<BleDevice> onConectar;
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    if (notebooks.isEmpty) {
+-      return const Center(
+-        child: Padding(
+-          padding: EdgeInsets.all(16),
+-          child: Text('Nenhum notebook encontrado.'),
+-        ),
+-      );
+-    }
+-
+-    return ListView.builder(
+-      itemCount: notebooks.length,
+-      itemBuilder: (context, index) {
+-        final notebook = notebooks[index];
+-        final nome = notebook.name?.isNotEmpty == true
+-            ? notebook.name!
+-            : 'Notebook BLE';
+-
+-        return ListTile(
+-          leading: const Icon(Icons.computer),
+-          title: Text(nome),
+-          subtitle: Text(notebook.deviceId),
+-          trailing: IconButton(
+-            tooltip: 'Conectar',
+-            onPressed: conectando ? null : () => onConectar(notebook),
+-            icon: conectando
+-                ? const SizedBox.square(
+-                    dimension: 20,
+-                    child: CircularProgressIndicator(strokeWidth: 2),
+-                  )
+-                : const Icon(Icons.link),
+-          ),
+-        );
+-      },
+-    );
+-  }
+-}
+-
+ class _Chat extends StatelessWidget {
+   const _Chat({
+     required this.mensagens,
+diff --git a/app/pubspec.lock b/app/pubspec.lock
+index f32f247..1505fbd 100644
+--- a/app/pubspec.lock
++++ b/app/pubspec.lock
+@@ -17,14 +17,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "2.13.1"
+-  bluez:
+-    dependency: transitive
+-    description:
+-      name: bluez
+-      sha256: "61a7204381925896a374301498f2f5399e59827c6498ae1e924aaa598751b545"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.8.3"
+   boolean_selector:
+     dependency: transitive
+     description:
+@@ -161,10 +153,10 @@ packages:
+     dependency: "direct main"
+     description:
+       name: flutter_contacts
+-      sha256: "558247c39d89ca738aceb7859b6147a0ede0a5084492cffa215db87dea672479"
++      sha256: f668066af6cad0cc1d91719560edc1e552993dcafb12cb687ca8690b858b993d
+       url: "https://pub.dev"
+     source: hosted
+-    version: "2.2.0"
++    version: "2.1.0"
+   flutter_lints:
+     dependency: "direct dev"
+     description:
+@@ -186,14 +178,6 @@ packages:
+     description: flutter
+     source: sdk
+     version: "0.0.0"
+-  flutter_web_bluetooth:
+-    dependency: transitive
+-    description:
+-      name: flutter_web_bluetooth
+-      sha256: ad26a1b3fef95b86ea5f63793b9a0cdc1a33490f35d754e4e711046cae3ebbf8
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.1.0"
+   flutter_web_plugins:
+     dependency: transitive
+     description: flutter
+@@ -383,14 +367,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "6.1.0"
+-  logging:
+-    dependency: transitive
+-    description:
+-      name: logging
+-      sha256: c8245ada5f1717ed44271ed1c26b8ce85ca3228fd2ffdb75468ab01979309d61
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.3.0"
+   matcher:
+     dependency: transitive
+     description:
+@@ -411,10 +387,10 @@ packages:
+     dependency: transitive
+     description:
+       name: meta
+-      sha256: "1741988757a65eb6b36abe716829688cf01910bbf91c34354ff7ec1c3de2b349"
++      sha256: "23f08335362185a5ea2ad3a4e597f1375e78bce8a040df5c600c8d3552ef2394"
+       url: "https://pub.dev"
+     source: hosted
+-    version: "1.18.0"
++    version: "1.17.0"
+   mime:
+     dependency: transitive
+     description:
+@@ -656,10 +632,10 @@ packages:
+     dependency: transitive
+     description:
+       name: test_api
+-      sha256: "949a932224383300f01be9221c39180316445ecb8e7547f70a41a35bf421fb9e"
++      sha256: "8161c84903fd860b26bfdefb7963b3f0b68fee7adea0f59ef805ecca346f0c7a"
+       url: "https://pub.dev"
+     source: hosted
+-    version: "0.7.11"
++    version: "0.7.10"
+   typed_data:
+     dependency: transitive
+     description:
+@@ -668,14 +644,6 @@ packages:
+       url: "https://pub.dev"
+     source: hosted
+     version: "1.4.0"
+-  universal_ble:
+-    dependency: "direct main"
+-    description:
+-      name: universal_ble
+-      sha256: ff3c4ea34e1360ba593c68f68ff2d0cd598dcb054b0de1d89c0936dbb5dd9707
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.0.2"
+   uuid:
+     dependency: transitive
+     description:
+@@ -733,5 +701,5 @@ packages:
+     source: hosted
+     version: "7.0.1"
+ sdks:
+-  dart: ">=3.12.0 <4.0.0"
+-  flutter: ">=3.44.0"
++  dart: ">=3.11.5 <4.0.0"
++  flutter: ">=3.38.0"
+diff --git a/app/pubspec.yaml b/app/pubspec.yaml
+index 1de9873..2033695 100644
+--- a/app/pubspec.yaml
++++ b/app/pubspec.yaml
+@@ -15,12 +15,11 @@ dependencies:
+     sdk: flutter
+ 
+   permission_handler: ^12.0.1
+-  flutter_contacts: ^2.2.0
++  flutter_contacts: ^2.1.0
+   geolocator: ^14.0.2
+   image_picker: ^1.2.2
+   nearby_connections: ^4.3.0
+   shared_preferences: ^2.5.3
+-  universal_ble: ^2.0.2
+ 
+ dev_dependencies:
+   flutter_test:

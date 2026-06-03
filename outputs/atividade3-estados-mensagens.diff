@@ -1,0 +1,266 @@
+﻿diff --git a/app/lib/features/connection/connection_screen.dart b/app/lib/features/connection/connection_screen.dart
+index c812e99..b4e8fbe 100644
+--- a/app/lib/features/connection/connection_screen.dart
++++ b/app/lib/features/connection/connection_screen.dart
+@@ -605,7 +605,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+ 
+     try {
+       await _enviarBytes(conversa, bytes);
+-      _atualizarStatusMensagem(mensagemId, MessageStatus.recebida);
+     } catch (erro) {
+       _definirErro('Não foi possível enviar a mensagem: $erro');
+     }
+@@ -618,8 +617,11 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     );
+     if (index == -1) return;
+ 
++    final mensagemAtual = _mensagens[index];
++    if (mensagemAtual.status.index >= status.index) return;
++
+     setState(() {
+-      _mensagens[index] = _mensagens[index].copyWith(status: status);
++      _mensagens[index] = mensagemAtual.copyWith(status: status);
+     });
+     unawaited(_persistirMensagens());
+   }
+@@ -642,7 +644,9 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+           mensagem.status != MessageStatus.aberta) {
+         _mensagens[i] = mensagem.copyWith(status: MessageStatus.aberta);
+         alterou = true;
+-        unawaited(_enviarConfirmacaoAbertura(conversaId, mensagem.id));
++        unawaited(
++          _confirmarEstadoRemoto(conversaId, mensagem.id, aberta: true),
++        );
+       }
+     }
+ 
+@@ -656,6 +660,17 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     return _appEmPrimeiroPlano && _conversaSelecionadaId == conversaId;
+   }
+ 
++  Future<void> _enviarConfirmacaoRecebimento(
++    String conversaId,
++    String mensagemId,
++  ) async {
++    final conversa = _conversaPorId(conversaId);
++    if (conversa == null) return;
++
++    final bytes = _codificarConfirmacaoRecebimento(mensagemId);
++    await _enviarBytes(conversa, bytes);
++  }
++
+   Future<void> _enviarConfirmacaoAbertura(
+     String conversaId,
+     String mensagemId,
+@@ -667,6 +682,21 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+     await _enviarBytes(conversa, bytes);
+   }
+ 
++  Future<void> _confirmarEstadoRemoto(
++    String conversaId,
++    String mensagemId, {
++    required bool aberta,
++  }) async {
++    try {
++      await _enviarConfirmacaoRecebimento(conversaId, mensagemId);
++      if (aberta) {
++        await _enviarConfirmacaoAbertura(conversaId, mensagemId);
++      }
++    } catch (_) {
++      // A confirmacao sera reenviada se a mensagem chegar novamente.
++    }
++  }
++
+   Future<void> _reenviarMensagensPendentes(String conversaId) async {
+     final conversa = _conversaPorId(conversaId);
+     if (conversa == null) return;
+@@ -683,10 +713,6 @@ class _ConnectionScreenState extends State<ConnectionScreen>
+ 
+     final bytes = _codificarLoteMensagens(pendentes);
+     await _enviarBytes(conversa, bytes);
+-
+-    for (final mensagem in pendentes) {
+-      _atualizarStatusMensagem(mensagem.id, MessageStatus.recebida);
+-    }
+   }
+ 
+   String _chaveCelular(String id) => 'celular:$id';
+diff --git a/app/lib/features/connection/data/message_protocol.dart b/app/lib/features/connection/data/message_protocol.dart
+index 923f1f6..49aef85 100644
+--- a/app/lib/features/connection/data/message_protocol.dart
++++ b/app/lib/features/connection/data/message_protocol.dart
+@@ -20,6 +20,10 @@ extension _ConnectionMessageProtocol on _ConnectionScreenState {
+     );
+   }
+ 
++  Uint8List _codificarConfirmacaoRecebimento(String mensagemId) {
++    return MessageProtocol.encodeReceived(mensagemId);
++  }
++
+   Uint8List _codificarConfirmacaoAbertura(String mensagemId) {
+     return MessageProtocol.encodeOpened(mensagemId);
+   }
+@@ -32,6 +36,11 @@ extension _ConnectionMessageProtocol on _ConnectionScreenState {
+     final pacotes = MessageProtocol.decodePackets(texto);
+ 
+     for (final pacote in pacotes) {
++      if (pacote.type == MessagePacketType.received) {
++        _atualizarStatusMensagem(pacote.id, MessageStatus.recebida);
++        continue;
++      }
++
+       if (pacote.type == MessagePacketType.opened) {
+         _atualizarStatusMensagem(pacote.id, MessageStatus.aberta);
+         continue;
+@@ -41,9 +50,13 @@ extension _ConnectionMessageProtocol on _ConnectionScreenState {
+           ? MessageStatus.aberta
+           : MessageStatus.recebida;
+       if (_mensagens.any((mensagem) => mensagem.id == pacote.id)) {
+-        if (status == MessageStatus.aberta) {
+-          unawaited(_enviarConfirmacaoAbertura(conversaId, pacote.id));
+-        }
++        unawaited(
++          _confirmarEstadoRemoto(
++            conversaId,
++            pacote.id,
++            aberta: status == MessageStatus.aberta,
++          ),
++        );
+         continue;
+       }
+       _adicionarMensagemRecebidaAoHistorico(
+@@ -56,9 +69,13 @@ extension _ConnectionMessageProtocol on _ConnectionScreenState {
+           status: status,
+         ),
+       );
+-      if (status == MessageStatus.aberta) {
+-        unawaited(_enviarConfirmacaoAbertura(conversaId, pacote.id));
+-      }
++      unawaited(
++        _confirmarEstadoRemoto(
++          conversaId,
++          pacote.id,
++          aberta: status == MessageStatus.aberta,
++        ),
++      );
+     }
+   }
+ }
+diff --git a/app/lib/features/connection/widgets/connection_widgets.dart b/app/lib/features/connection/widgets/connection_widgets.dart
+index fc2ac20..9f1434e 100644
+--- a/app/lib/features/connection/widgets/connection_widgets.dart
++++ b/app/lib/features/connection/widgets/connection_widgets.dart
+@@ -325,19 +325,21 @@ class _Chat extends StatelessWidget {
+                             ),
+                             const SizedBox(height: 4),
+                             Text(mensagem.texto),
+-                            const SizedBox(height: 6),
+-                            Align(
+-                              alignment: Alignment.centerRight,
+-                              child: Text(
+-                                mensagem.status.rotulo,
+-                                style: Theme.of(context).textTheme.labelSmall
+-                                    ?.copyWith(
+-                                      color: Theme.of(
+-                                        context,
+-                                      ).colorScheme.onSurfaceVariant,
+-                                    ),
++                            if (mensagem.enviadaPorMim) ...[
++                              const SizedBox(height: 6),
++                              Align(
++                                alignment: Alignment.centerRight,
++                                child: Text(
++                                  mensagem.status.rotulo,
++                                  style: Theme.of(context).textTheme.labelSmall
++                                      ?.copyWith(
++                                        color: Theme.of(
++                                          context,
++                                        ).colorScheme.onSurfaceVariant,
++                                      ),
++                                ),
+                               ),
+-                            ),
++                            ],
+                           ],
+                         ),
+                       ),
+diff --git a/app/test/widget_test.dart b/app/test/widget_test.dart
+index 14e753e..584e28b 100644
+--- a/app/test/widget_test.dart
++++ b/app/test/widget_test.dart
+@@ -1,3 +1,6 @@
++import 'dart:convert';
++
++import 'package:connection_shared/connection_shared.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ 
+ import 'package:exemplo_quatro/app/connection_app.dart';
+@@ -8,4 +11,20 @@ void main() {
+ 
+     expect(find.text('Chat local'), findsOneWidget);
+   });
++
++  test('protocolo reconhece confirmacao de recebimento', () {
++    final bytes = MessageProtocol.encodeReceived('mensagem-1');
++    final packet = MessageProtocol.decodePacket(utf8.decode(bytes));
++
++    expect(packet.type, MessagePacketType.received);
++    expect(packet.id, 'mensagem-1');
++  });
++
++  test('ordem dos estados segue o fluxo da mensagem', () {
++    expect(
++      MessageStatus.digitada.index,
++      lessThan(MessageStatus.recebida.index),
++    );
++    expect(MessageStatus.recebida.index, lessThan(MessageStatus.aberta.index));
++  });
+ }
+diff --git a/shared/lib/src/message_packet.dart b/shared/lib/src/message_packet.dart
+index 228460c..2778198 100644
+--- a/shared/lib/src/message_packet.dart
++++ b/shared/lib/src/message_packet.dart
+@@ -1,4 +1,4 @@
+-enum MessagePacketType { message, opened }
++enum MessagePacketType { message, received, opened }
+ 
+ class MessagePacket {
+   const MessagePacket._({
+@@ -11,6 +11,10 @@ class MessagePacket {
+     return MessagePacket._(type: MessagePacketType.message, id: id, text: text);
+   }
+ 
++  factory MessagePacket.received(String id) {
++    return MessagePacket._(type: MessagePacketType.received, id: id, text: '');
++  }
++
+   factory MessagePacket.opened(String id) {
+     return MessagePacket._(type: MessagePacketType.opened, id: id, text: '');
+   }
+diff --git a/shared/lib/src/message_protocol.dart b/shared/lib/src/message_protocol.dart
+index 2a2e8bd..b1909a2 100644
+--- a/shared/lib/src/message_protocol.dart
++++ b/shared/lib/src/message_protocol.dart
+@@ -31,6 +31,12 @@ class MessageProtocol {
+     );
+   }
+ 
++  static Uint8List encodeReceived(String messageId) {
++    return Uint8List.fromList(
++      utf8.encode(jsonEncode({'type': 'received', 'id': messageId})),
++    );
++  }
++
+   static Uint8List encodeOpened(String messageId) {
+     return Uint8List.fromList(
+       utf8.encode(jsonEncode({'type': 'opened', 'id': messageId})),
+@@ -43,6 +49,9 @@ class MessageProtocol {
+       if (json is Map<String, dynamic>) {
+         final type = json['type'];
+         final id = json['id'];
++        if (type == 'received' && id is String) {
++          return MessagePacket.received(id);
++        }
+         if (type == 'opened' && id is String) {
+           return MessagePacket.opened(id);
+         }
