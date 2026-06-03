@@ -18,6 +18,9 @@ dependencies:
   nearby_connections: ^4.3.0
   shared_preferences: ^2.5.3
 
+dependency_overrides:
+  shared_preferences_android: 2.3.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
