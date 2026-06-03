@@ -1,14 +1,14 @@
 # Chat local entre celulares
 
-Projeto Flutter ajustado para a atividade de comunicacao entre dispositivos moveis.
+Projeto Flutter para comunicação local entre celulares Android.
 
-O foco da entrega esta no aplicativo Android em `app/`. O projeto original tambem possui uma pasta `desktop/`, mas a atividade solicitou remover o fluxo celular-notebook do aplicativo mobile e manter a comunicacao entre celulares.
+O aplicativo principal está em `app/` e foi ajustado para atender aos requisitos da atividade: comunicação entre celulares, Wi-Fi Direct, controle correto dos estados das mensagens e funcionamento com múltiplos dispositivos.
 
 ## O que foi implementado
 
-1. Remocao do fluxo celular-notebook no app mobile.
-2. Comunicacao direta via Wi-Fi Direct entre celulares.
-3. Correcao dos estados das mensagens:
+1. Remoção do fluxo celular-notebook no aplicativo mobile.
+2. Comunicação direta via Wi-Fi Direct entre celulares.
+3. Correção dos estados das mensagens:
    - `Digitada`
    - `Recebida`
    - `Aberta`
@@ -40,38 +40,38 @@ shared/
     |-- message_status.dart
     `-- message_batch_item.dart
 outputs/
-`-- arquivos de explicacao e diffs das atividades
+`-- arquivos de explicação e diffs das atividades
 ```
 
-## Comunicacao entre celulares
+## Comunicação entre celulares
 
-O app possui dois caminhos de comunicacao:
+O app possui dois caminhos de comunicação:
 
-- `Nearby Connections`, usado na opcao `Buscar celulares`.
+- `Nearby Connections`, usado na opção `Buscar celulares`.
 - `Wi-Fi Direct`, implementado diretamente no Android usando `WifiP2pManager` e sockets TCP.
 
-No Wi-Fi Direct, o Flutter conversa com o Android por `MethodChannel`. O Android faz a descoberta/conexao com `WifiP2pManager` e, depois que o grupo Wi-Fi Direct e formado, troca os bytes das mensagens por socket TCP na porta `8988`.
+No Wi-Fi Direct, o Flutter conversa com o Android por `MethodChannel`. O Android faz a descoberta/conexão com `WifiP2pManager` e, depois que o grupo Wi-Fi Direct é formado, troca os bytes das mensagens por socket TCP na porta `8988`.
 
 ## Estados das mensagens
 
-O fluxo corrigido dos estados e:
+O fluxo corrigido dos estados é:
 
 1. `Digitada`: a mensagem foi criada localmente.
-2. `Recebida`: o outro celular recebeu e enviou confirmacao `received`.
-3. `Aberta`: o outro celular abriu a conversa e enviou confirmacao `opened`.
+2. `Recebida`: o outro celular recebeu e enviou confirmação `received`.
+3. `Aberta`: o outro celular abriu a conversa e enviou confirmação `opened`.
 
-O estado so avanca; ele nao volta de `Aberta` para `Recebida`, por exemplo.
+O estado só avança; ele não volta de `Aberta` para `Recebida`, por exemplo.
 
-## Multiplos dispositivos
+## Múltiplos dispositivos
 
-O app guarda os dispositivos conectados em mapas separados para Nearby e Wi-Fi Direct. A lista de conversas e criada a partir desses dispositivos, e cada mensagem fica vinculada a um `conversaId`.
+O app guarda os dispositivos conectados em mapas separados para Nearby e Wi-Fi Direct. A lista de conversas é criada a partir desses dispositivos, e cada mensagem fica vinculada a um `conversaId`.
 
 Para demonstrar com 3 celulares:
 
 1. Abra o app nos celulares A, B e C.
 2. Conecte B ao A.
 3. Conecte C ao A.
-4. No A, confirme que aparecem duas conversas e o cabecalho informa `2 dispositivos conectados`.
+4. No A, confirme que aparecem duas conversas e o cabeçalho informa `2 dispositivos conectados`.
 5. Troque mensagens entre A e B, depois entre A e C.
 
 ## Arquivos de estudo
@@ -104,6 +104,6 @@ cd shared
 dart analyze
 ```
 
-## Observacao
+## Observação
 
-A validacao automatica confirma a consistencia do codigo. A demonstracao final das atividades 2 e 4 precisa ser feita em celulares Android reais, porque Wi-Fi Direct e conexoes entre multiplos dispositivos dependem do hardware e do sistema Android.
+A validação automática confirma a consistência do código. A demonstração final das atividades 2 e 4 precisa ser feita em celulares Android reais, porque Wi-Fi Direct e conexões entre múltiplos dispositivos dependem do hardware e do sistema Android.
